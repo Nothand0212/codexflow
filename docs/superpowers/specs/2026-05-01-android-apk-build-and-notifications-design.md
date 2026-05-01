@@ -2,19 +2,7 @@
 
 ## Status
 
-Drafted on 2026-05-01 after user review of the design direction.
-
-Revised after review to address Android 15 foreground service limits, service restart behavior, polling backoff, notification identity, test coverage, runtime APK verification, and APK versioning.
-
-Second revision clarifies approval-to-session mapping, snapshot persistence format, timeout behavior, monitor stop semantics, low-version Android compatibility, repeated notification alerts, URL snapshot cleanup, and release shrinking constraints.
-
-Third revision clarifies foreground/background visibility signaling, poll-based missed-event limits, batch notification copy, synchronous snapshot writes, APK metadata path, Web download link updates, pending-count precedence, and notification permission timing.
-
-Fourth revision clarifies notification tap routing for cold and warm starts, foreground service startup timing, notification permission behavior for foreground-service notifications, turn result key formatting, manual restart baseline semantics, snapshot version handling, and batch turn-result navigation.
-
-Fifth revision adds release signing strategy, final-turn notification handling when a session leaves `managed`, manual-stop persistence ordering, metadata generation requirements, empty-dashboard behavior, and rollout command requirements.
-
-Sixth revision reconciles the final-turn transition exception with monitored-session rules, adds dedupe/pruning requirements for `managedTurnState`, adds manual-stop-then-resume device verification, and makes release keystore generation non-interactive.
+Drafted on 2026-05-01 after user review of the design direction. Revised through six review rounds addressing Android platform constraints, notification state machine, release signing, rollout, and edge cases.
 
 ## Context
 
@@ -383,6 +371,7 @@ On every poll:
    - If `seenTurnResults` already contains that key, do not alert.
    - If an alert is emitted, immediately add that key to `seenTurnResults`.
    - Remove that session from `managedTurnState` before persisting the next snapshot.
+   - If the session no longer exists anywhere in the current dashboard, do not alert because the final status cannot be confirmed.
 7. Update the persistent status notification.
 8. Compare current state with the previous snapshot.
 9. Emit alert notifications only for new eligible transitions.
@@ -467,6 +456,8 @@ On service start:
 - if monitoring is re-enabled after the user manually stopped it, clear the manual-stopped flag and treat the first successful dashboard response as a fresh baseline without alerting
 - if a persisted snapshot exists for the current Agent URL, compare the first successful dashboard response against it and notify for new eligible events
 - if no persisted snapshot exists for the current Agent URL, the first successful dashboard response becomes the baseline and emits no alert notifications
+
+Whenever a fresh baseline is created, populate `managedTurnState` from the current managed sessions' `lastTurnId` and `lastTurnStatus`. This applies to first start, manual re-enable after stop, URL switch, and unsupported snapshot version recovery. The next poll can then detect a managed session that transitions out of `managed`.
 
 This prevents system-kill-and-restart cycles from swallowing events that happened while the service was down.
 
@@ -733,6 +724,8 @@ Add tests for:
 - managed sessions that move out of `managed` between polls still produce one turn result alert if their current dashboard summary has a newly completed/interrupted last turn.
 - transition-final turn alerts are written to `seenTurnResults` immediately and removed from `managedTurnState` before the next snapshot is persisted.
 - `managedTurnState` is pruned to current managed session ids after each successful poll.
+- fresh baselines populate `managedTurnState` from current managed sessions.
+- sessions that disappear entirely from dashboard do not emit final turn result alerts.
 - valid empty dashboards show online running 0 pending 0 and do not clear deduplication state or duplicate later notifications.
 - manual action alerts are not emitted for the initial baseline.
 - persisted snapshots are loaded on service restart and new events since the previous snapshot are not swallowed.
