@@ -19,7 +19,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
-        captureNotificationRoute(intent)
+        captureNotificationRoute(intent, deliverToFlutter = false)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -55,15 +55,12 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
-        pendingNotificationRoute?.let { route ->
-            channel?.invokeMethod("notificationRoute", route)
-        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        captureNotificationRoute(intent)
+        captureNotificationRoute(intent, deliverToFlutter = true)
     }
 
     private fun startMonitor() {
@@ -157,7 +154,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun captureNotificationRoute(intent: Intent?) {
+    private fun captureNotificationRoute(intent: Intent?, deliverToFlutter: Boolean) {
         if (intent?.action != CodexFlowNotifications.ACTION_NOTIFICATION_ROUTE) {
             return
         }
@@ -166,7 +163,9 @@ class MainActivity : FlutterActivity() {
             return
         }
         pendingNotificationRoute = route
-        channel?.invokeMethod("notificationRoute", route)
+        if (deliverToFlutter) {
+            channel?.invokeMethod("notificationRoute", route)
+        }
     }
 
     companion object {
