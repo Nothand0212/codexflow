@@ -5,12 +5,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/app_models.dart';
 import '../services/api_client.dart';
+import '../services/android_monitor_bridge.dart';
 
-enum ApprovalActionType {
-  choice,
-  decision,
-  submitText,
-}
+enum ApprovalActionType { choice, decision, submitText }
 
 class ApprovalAction {
   ApprovalAction.choice(this.value) : type = ApprovalActionType.choice;
@@ -39,15 +36,27 @@ class ApprovalAction {
 }
 
 class AppModel extends ChangeNotifier {
-  AppModel(this._prefs)
-      : baseUrlString =
-            _prefs.getString(_baseUrlKey) ?? 'http://127.0.0.1:4318';
+  AppModel(this._prefs, {AndroidMonitorBridgeApi? monitorBridge})
+    : _monitorBridge = monitorBridge ?? AndroidMonitorBridge(),
+      backgroundMonitoringEnabled = _prefs.getBool(_monitorEnabledKey) ?? true,
+      foregroundServiceRunning = false,
+      notificationPermissionGranted = false,
+      appVersionName = '',
+      appBuildNumber = 0,
+      baseUrlString = _prefs.getString(_baseUrlKey) ?? 'http://127.0.0.1:4318';
 
   static const _baseUrlKey = 'codexflow.baseURL';
+  static const _monitorEnabledKey = 'codexflow.monitor.enabled';
 
   final SharedPreferences _prefs;
+  final AndroidMonitorBridgeApi _monitorBridge;
 
   String baseUrlString;
+  bool backgroundMonitoringEnabled;
+  bool foregroundServiceRunning;
+  bool notificationPermissionGranted;
+  String appVersionName;
+  int appBuildNumber;
   DashboardResponse dashboard = DashboardResponse.placeholder();
   final Map<String, SessionDetail> sessionDetails = <String, SessionDetail>{};
   bool isRefreshing = false;
@@ -70,6 +79,10 @@ class AppModel extends ChangeNotifier {
     }
     isBootstrapped = true;
     notifyListeners();
+    backgroundMonitoringEnabled =
+        _prefs.getBool(_monitorEnabledKey) ?? backgroundMonitoringEnabled;
+    await refreshMonitorStatus();
+    await startMonitorIfAllowed();
     await refreshDashboard();
   }
 
@@ -80,6 +93,61 @@ class AppModel extends ChangeNotifier {
 
   Future<void> saveBaseUrl() async {
     await _prefs.setString(_baseUrlKey, baseUrlString);
+  }
+
+  Future<void> refreshMonitorStatus() async {
+    final status = await _monitorBridge.getStatus();
+    foregroundServiceRunning = status.running;
+    notificationPermissionGranted = status.notificationPermissionGranted;
+    appVersionName = status.versionName;
+    appBuildNumber = status.buildNumber;
+    notifyListeners();
+  }
+
+  Future<void> startMonitorIfAllowed() async {
+    if (!backgroundMonitoringEnabled) {
+      return;
+    }
+    await _monitorBridge.start();
+    await refreshMonitorStatus();
+  }
+
+  Future<void> enableMonitorFromSettings() async {
+    backgroundMonitoringEnabled = true;
+    await _prefs.setBool(_monitorEnabledKey, true);
+    notifyListeners();
+    await startMonitorIfAllowed();
+  }
+
+  Future<void> stopMonitorFromSettings() async {
+    backgroundMonitoringEnabled = false;
+    await _prefs.setBool(_monitorEnabledKey, false);
+    await _monitorBridge.stop();
+    await refreshMonitorStatus();
+  }
+
+  Future<void> setMonitorVisible(bool visible) async {
+    await _monitorBridge.setVisible(visible);
+    await refreshMonitorStatus();
+  }
+
+  Future<void> notifyMonitorAgentUrlChanged() async {
+    await _monitorBridge.agentUrlChanged(baseUrlString);
+    await refreshMonitorStatus();
+  }
+
+  Future<void> requestMonitorNotifications() async {
+    notificationPermissionGranted = await _monitorBridge
+        .requestNotificationPermission();
+    await refreshMonitorStatus();
+  }
+
+  void setNotificationRouteHandler(NotificationRouteHandler? handler) {
+    _monitorBridge.setNotificationRouteHandler(handler);
+  }
+
+  Future<String?> takeInitialNotificationRoute() {
+    return _monitorBridge.takeInitialNotificationRoute();
   }
 
   Future<void> refreshDashboard() async {
@@ -112,10 +180,9 @@ class AppModel extends ChangeNotifier {
     if (!supportsApprovalsForSessionId(sessionId)) {
       return <PendingRequestView>[];
     }
-    final approvals = dashboard.approvals
-        .where((item) => item.threadId == sessionId)
-        .toList()
-      ..sort((left, right) => left.createdAt.compareTo(right.createdAt));
+    final approvals =
+        dashboard.approvals.where((item) => item.threadId == sessionId).toList()
+          ..sort((left, right) => left.createdAt.compareTo(right.createdAt));
     return approvals;
   }
 
@@ -279,9 +346,9 @@ class AppModel extends ChangeNotifier {
       );
       await refreshDashboard();
       final session = dashboard.sessions.cast<SessionSummary?>().firstWhere(
-            (item) => item?.id == approval.threadId,
-            orElse: () => null,
-          );
+        (item) => item?.id == approval.threadId,
+        orElse: () => null,
+      );
       if (session != null) {
         await loadSession(session.id);
       }
@@ -321,10 +388,7 @@ class AppModel extends ChangeNotifier {
             scope = null;
         }
 
-        return <String, dynamic>{
-          'permissions': permissions,
-          'scope': scope,
-        };
+        return <String, dynamic>{'permissions': permissions, 'scope': scope};
       case 'userInput':
         final questionId = _firstQuestionId(approval.params) ?? 'reply';
         return <String, dynamic>{
@@ -465,8 +529,9 @@ class AppModel extends ChangeNotifier {
     if (normalized.isEmpty) {
       return;
     }
-    final exists = dashboard.agents
-        .any((item) => item.id == normalized && item.available);
+    final exists = dashboard.agents.any(
+      (item) => item.id == normalized && item.available,
+    );
     if (!exists) {
       return;
     }

@@ -18,10 +18,7 @@ Future<void> main() async {
 }
 
 class CodexFlowApp extends StatelessWidget {
-  const CodexFlowApp({
-    super.key,
-    required this.prefs,
-  });
+  const CodexFlowApp({super.key, required this.prefs});
 
   final SharedPreferences prefs;
 
@@ -68,7 +65,7 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   int _index = 0;
   Timer? _timer;
 
@@ -81,7 +78,12 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      final model = context.read<AppModel>();
+      model.setNotificationRouteHandler(_handleNotificationRoute);
+      unawaited(model.startMonitorIfAllowed());
+      unawaited(_takeInitialNotificationRoute(model));
       _timer = Timer.periodic(const Duration(seconds: 8), (_) {
         if (!mounted) {
           return;
@@ -94,17 +96,39 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void dispose() {
     _timer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final visible = state == AppLifecycleState.resumed;
+    unawaited(context.read<AppModel>().setMonitorVisible(visible));
+  }
+
+  Future<void> _takeInitialNotificationRoute(AppModel model) async {
+    final route = await model.takeInitialNotificationRoute();
+    if (!mounted || route == null || route.isEmpty) {
+      return;
+    }
+    _handleNotificationRoute(route);
+  }
+
+  void _handleNotificationRoute(String route) {
+    if (!mounted) {
+      return;
+    }
+    final normalized = route.toLowerCase();
+    setState(() {
+      _index = normalized.contains('approval') ? 1 : 0;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Palette.canvas,
-      body: IndexedStack(
-        index: _index,
-        children: _pages,
-      ),
+      body: IndexedStack(index: _index, children: _pages),
       bottomNavigationBar: NavigationBar(
         backgroundColor: Palette.panelStrong,
         indicatorColor: Palette.softBlue.appOpacity(0.12),
@@ -119,10 +143,7 @@ class _HomeShellState extends State<HomeShell> {
             icon: Icon(Icons.checklist_rounded),
             label: '审批',
           ),
-          NavigationDestination(
-            icon: Icon(Icons.tune_rounded),
-            label: '设置',
-          ),
+          NavigationDestination(icon: Icon(Icons.tune_rounded), label: '设置'),
         ],
       ),
     );

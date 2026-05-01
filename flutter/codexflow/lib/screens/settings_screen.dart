@@ -40,14 +40,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final model = context.watch<AppModel>();
-    final connectionTone =
-        model.isAgentOnline ? Palette.accent : Palette.danger;
+    final connectionTone = model.isAgentOnline
+        ? Palette.accent
+        : Palette.danger;
 
     return Scaffold(
       backgroundColor: Palette.canvas,
       appBar: AppBar(
-        title: Text('设置',
-            style: roundedTextStyle(size: 17, weight: FontWeight.w600)),
+        title: Text(
+          '设置',
+          style: roundedTextStyle(size: 17, weight: FontWeight.w600),
+        ),
         centerTitle: true,
       ),
       body: PageScaffold(
@@ -58,9 +61,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  Text('连接设置',
-                      style:
-                          roundedTextStyle(size: 16, weight: FontWeight.w600)),
+                  Text(
+                    '连接设置',
+                    style: roundedTextStyle(size: 16, weight: FontWeight.w600),
+                  ),
                   const SizedBox(height: 12),
                   CodexTextField(
                     controller: _controller,
@@ -89,6 +93,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             FocusScope.of(context).unfocus();
                             model.updateBaseUrlString(_controller.text);
                             await model.saveBaseUrl();
+                            await model.notifyMonitorAgentUrlChanged();
                             await model.refreshDashboard();
                           },
                         ),
@@ -115,9 +120,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Text(
                       'Agent 当前监听：${model.dashboard.agent.listenAddr}',
                       style: roundedTextStyle(
-                          size: 12,
-                          weight: FontWeight.w500,
-                          color: Palette.mutedInk),
+                        size: 12,
+                        weight: FontWeight.w500,
+                        color: Palette.mutedInk,
+                      ),
                     ),
                   ],
                 ],
@@ -131,13 +137,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 children: <Widget>[
                   Row(
                     children: <Widget>[
-                      Text('当前连接',
-                          style: roundedTextStyle(
-                              size: 16, weight: FontWeight.w600)),
+                      Text(
+                        '当前连接',
+                        style: roundedTextStyle(
+                          size: 16,
+                          weight: FontWeight.w600,
+                        ),
+                      ),
                       const Spacer(),
                       Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 6),
+                          horizontal: 10,
+                          vertical: 6,
+                        ),
                         decoration: BoxDecoration(
                           color: connectionTone.appOpacity(0.12),
                           borderRadius: BorderRadius.circular(999),
@@ -148,16 +160,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               width: 8,
                               height: 8,
                               decoration: BoxDecoration(
-                                  color: connectionTone,
-                                  shape: BoxShape.circle),
+                                color: connectionTone,
+                                shape: BoxShape.circle,
+                              ),
                             ),
                             const SizedBox(width: 6),
                             Text(
                               model.isAgentOnline ? '在线' : '离线',
                               style: roundedTextStyle(
-                                  size: 12,
-                                  weight: FontWeight.w700,
-                                  color: connectionTone),
+                                size: 12,
+                                weight: FontWeight.w700,
+                                color: connectionTone,
+                              ),
                             ),
                           ],
                         ),
@@ -175,8 +189,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   const SizedBox(height: 8),
                   _SettingsInfoRow(
-                      title: 'Codex 路径',
-                      value: model.dashboard.agent.codexBinaryPath),
+                    title: 'Codex 路径',
+                    value: model.dashboard.agent.codexBinaryPath,
+                  ),
                   if (model.agentConnectionError.isNotEmpty) ...<Widget>[
                     const SizedBox(height: 10),
                     Container(
@@ -189,12 +204,104 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       child: Text(
                         model.agentConnectionError,
                         style: roundedTextStyle(
-                            size: 12,
-                            weight: FontWeight.w500,
-                            color: Palette.danger),
+                          size: 12,
+                          weight: FontWeight.w500,
+                          color: Palette.danger,
+                        ),
                       ),
                     ),
                   ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            PanelCard(
+              compact: true,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      Text(
+                        '后台监控',
+                        style: roundedTextStyle(
+                          size: 16,
+                          weight: FontWeight.w600,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        model.appVersionName.isEmpty
+                            ? '版本未知'
+                            : 'v${model.appVersionName}+${model.appBuildNumber}',
+                        style: roundedTextStyle(
+                          size: 12,
+                          weight: FontWeight.w600,
+                          color: Palette.mutedInk,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  _SettingsInfoRow(
+                    title: '后台监控',
+                    value: model.backgroundMonitoringEnabled ? '已启用' : '已关闭',
+                  ),
+                  const SizedBox(height: 8),
+                  _SettingsInfoRow(
+                    title: '前台服务',
+                    value: model.foregroundServiceRunning ? '运行中' : '未运行',
+                  ),
+                  const SizedBox(height: 8),
+                  _SettingsInfoRow(
+                    title: '通知权限',
+                    value: model.notificationPermissionGranted ? '已授权' : '未授权',
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: ActionButton(
+                          title: '开启监控',
+                          background: Palette.accent,
+                          foreground: Colors.white,
+                          fontSize: 14,
+                          enabled:
+                              !model.backgroundMonitoringEnabled ||
+                              !model.foregroundServiceRunning,
+                          onPressed: () async {
+                            await model.enableMonitorFromSettings();
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: ActionButton(
+                          title: '停止监控',
+                          background: Palette.danger.appOpacity(0.12),
+                          foreground: Palette.danger,
+                          fontSize: 14,
+                          enabled:
+                              model.backgroundMonitoringEnabled ||
+                              model.foregroundServiceRunning,
+                          onPressed: () async {
+                            await model.stopMonitorFromSettings();
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  ActionButton(
+                    title: '请求通知权限',
+                    background: Palette.softBlue.appOpacity(0.14),
+                    foreground: Palette.softBlue,
+                    fontSize: 14,
+                    enabled: !model.notificationPermissionGranted,
+                    onPressed: () async {
+                      await model.requestMonitorNotifications();
+                    },
+                  ),
                 ],
               ),
             ),
@@ -207,33 +314,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   Text(
                     '使用说明',
                     style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: Palette.ink),
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: Palette.ink,
+                    ),
                   ),
                   SizedBox(height: 8),
                   Text(
                     '1. Mac 上先启动 Agent。',
                     style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                        color: Palette.mutedInk),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: Palette.mutedInk,
+                    ),
                   ),
                   SizedBox(height: 4),
                   Text(
                     '2. 手机填 Mac 的局域网地址。',
                     style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                        color: Palette.mutedInk),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: Palette.mutedInk,
+                    ),
                   ),
                   SizedBox(height: 4),
                   Text(
                     '3. 首页看会话，审批页处理授权。',
                     style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                        color: Palette.mutedInk),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: Palette.mutedInk,
+                    ),
                   ),
                 ],
               ),
@@ -246,10 +357,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 }
 
 class _SettingsInfoRow extends StatelessWidget {
-  const _SettingsInfoRow({
-    required this.title,
-    required this.value,
-  });
+  const _SettingsInfoRow({required this.title, required this.value});
 
   final String title;
   final String value;
@@ -269,7 +377,10 @@ class _SettingsInfoRow extends StatelessWidget {
           Text(
             title,
             style: roundedTextStyle(
-                size: 11, weight: FontWeight.w700, color: Palette.mutedInk),
+              size: 11,
+              weight: FontWeight.w700,
+              color: Palette.mutedInk,
+            ),
           ),
           const SizedBox(height: 4),
           Text(
