@@ -33,3 +33,8 @@ coverage.out
 .codexflow/
 codexflow-state.db
 codexflow-state.db-*
+
+# Android release signing
+flutter/codexflow/android/key.properties
+*.jks
+*.keystore
