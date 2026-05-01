@@ -38,3 +38,4 @@ codexflow-state.db-*
 flutter/codexflow/android/key.properties
 *.jks
 *.keystore
+codexflow-android-*.apk
