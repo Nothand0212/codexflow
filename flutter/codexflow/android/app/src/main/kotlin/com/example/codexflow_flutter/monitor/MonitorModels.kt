@@ -79,8 +79,12 @@ data class TurnResultEvent(
 data class MonitorStatus(
     val online: Boolean,
     val runningManagedCount: Int,
+    val runningTurnCount: Int,
     val pendingManualActionCount: Int,
     val hostPort: String,
+    val runningSessionLabels: List<String> = emptyList(),
+    val lastCheckedEpochSeconds: Long = 0,
+    val lastSuccessEpochSeconds: Long = 0,
 )
 
 data class MonitorDecision(

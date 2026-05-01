@@ -52,6 +52,56 @@ void main() {
     expect(merged.page.totalTurns, 3);
     expect(merged.page.hasMoreBefore, isFalse);
   });
+
+  test('parses media attachments on turn items', () {
+    final detail = SessionDetail.fromJson(<String, dynamic>{
+      'summary': _summaryJson(),
+      'turns': <Map<String, dynamic>>[
+        <String, dynamic>{
+          'id': 'turn-media',
+          'status': 'completed',
+          'startedAt': 1,
+          'completedAt': 2,
+          'durationMs': 1000,
+          'error': '',
+          'diff': '',
+          'planExplanation': '',
+          'plan': <Map<String, dynamic>>[],
+          'items': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'id': 'user-media',
+              'type': 'userMessage',
+              'body': 'screenshot attached',
+              'media': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'id': 'media-1',
+                  'kind': 'image',
+                  'name': 'screen.png',
+                  'mimeType': 'image/png',
+                  'url': '/api/v1/sessions/session-paged/media/media-1',
+                  'size': 100,
+                  'width': 640,
+                  'height': 360,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      'page': <String, dynamic>{
+        'turnOffset': 0,
+        'turnLimit': 1,
+        'totalTurns': 1,
+        'hasMoreBefore': false,
+      },
+    });
+
+    final media = detail.turns.single.items.single.media;
+    expect(media, hasLength(1));
+    expect(media.single.name, 'screen.png');
+    expect(media.single.url, '/api/v1/sessions/session-paged/media/media-1');
+    expect(media.single.width, 640);
+  });
 }
 
 Map<String, dynamic> _summaryJson() {

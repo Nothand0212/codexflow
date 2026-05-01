@@ -42,38 +42,37 @@ class CodexFlowNotifications(private val context: Context) {
     }
 
     fun persistent(status: MonitorStatus?): Notification {
-        val title = when {
-            status == null -> "CodexFlow starting"
-            status.online -> "CodexFlow online"
-            else -> "CodexFlow offline"
-        }
-        val text = if (status == null) {
-            "Loading agent status"
-        } else {
-            "Managed ${status.runningManagedCount} · Pending ${status.pendingManualActionCount}"
-        }
-        val expandedText = if (status == null) {
-            "Agent: starting\nStatus: loading\nTap to open CodexFlow"
-        } else {
-            listOf(
-                "Agent: ${if (status.online) "online" else "offline"}",
-                "Host: ${status.hostPort.ifBlank { "unknown" }}",
-                "Managed sessions: ${status.runningManagedCount}",
-                "Pending manual actions: ${status.pendingManualActionCount}",
-                "Tap to open dashboard",
-            ).joinToString("\n")
-        }
-        return NotificationCompat.Builder(context, CHANNEL_STATUS)
+        val content = PersistentStatusFormatter.format(status)
+        val builder = NotificationCompat.Builder(context, CHANNEL_STATUS)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
-            .setSubText(status?.hostPort?.takeIf { it.isNotBlank() })
+            .setContentTitle(content.title)
+            .setContentText(content.text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(content.expandedText))
+            .setSubText(content.subText)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setOngoing(true)
             .setSilent(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(routeIntent(NotificationTarget.dashboard()))
-            .build()
+            .addAction(
+                R.drawable.ic_dashboard_24,
+                "Dashboard",
+                routeIntent(NotificationTarget.dashboard()),
+            )
+            .addAction(
+                R.drawable.ic_approvals_24,
+                "Approvals",
+                routeIntent(NotificationTarget.approvals()),
+            )
+            .addAction(
+                R.drawable.ic_refresh_24,
+                "Refresh",
+                serviceIntent(CodexFlowMonitorService.ACTION_REFRESH_NOW, REQUEST_REFRESH),
+            )
+        content.notificationTimeMillis?.let { timestamp ->
+            builder.setShowWhen(true).setWhen(timestamp)
+        }
+        return builder.build()
     }
 
     fun manualAction(events: List<ManualActionEvent>): Notification {
@@ -151,6 +150,17 @@ class CodexFlowNotifications(private val context: Context) {
         )
     }
 
+    private fun serviceIntent(action: String, requestCode: Int): PendingIntent {
+        val intent = Intent(context, CodexFlowMonitorService::class.java)
+            .setAction(action)
+        return PendingIntent.getService(
+            context,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
     companion object {
         const val CHANNEL_MANUAL = "manual_action"
         const val CHANNEL_TURN = "turn_result"
@@ -158,6 +168,7 @@ class CodexFlowNotifications(private val context: Context) {
         const val ID_PERSISTENT = 1000
         const val ID_MANUAL = 2000
         const val ID_TURN = 3000
+        private const val REQUEST_REFRESH = 1001
         const val ACTION_NOTIFICATION_ROUTE = "com.example.codexflow_flutter.NOTIFICATION_ROUTE"
         const val EXTRA_NOTIFICATION_TARGET = "codexflow.notificationTarget"
     }

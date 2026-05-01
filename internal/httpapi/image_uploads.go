@@ -79,10 +79,10 @@ func (s *imageUploadStore) Save(name string, payload []byte) (imageUpload, error
 	return item, nil
 }
 
-func (s *imageUploadStore) Resolve(uploadID string) (string, error) {
+func (s *imageUploadStore) Resolve(uploadID string) (imageUpload, error) {
 	id := strings.TrimSpace(uploadID)
 	if id == "" {
-		return "", errors.New("upload id is required")
+		return imageUpload{}, errors.New("upload id is required")
 	}
 	now := time.Now().UTC()
 	s.mu.Lock()
@@ -90,13 +90,13 @@ func (s *imageUploadStore) Resolve(uploadID string) (string, error) {
 	s.cleanupLocked(now)
 	item, ok := s.items[id]
 	if !ok {
-		return "", errors.New("uploaded image not found or expired")
+		return imageUpload{}, errors.New("uploaded image not found or expired")
 	}
 	if _, err := os.Stat(item.Path); err != nil {
 		delete(s.items, id)
-		return "", errors.New("uploaded image is unavailable")
+		return imageUpload{}, errors.New("uploaded image is unavailable")
 	}
-	return item.Path, nil
+	return item, nil
 }
 
 func (s *imageUploadStore) cleanupLocked(now time.Time) {

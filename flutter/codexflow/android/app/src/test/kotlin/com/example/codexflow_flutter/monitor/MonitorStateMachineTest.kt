@@ -25,6 +25,11 @@ class MonitorStateMachineTest {
         assertTrue(result.turnResults.isEmpty())
         assertEquals("t1", result.snapshot.urlState("http://100.91.5.116:4318").managedTurnState["s1"]?.lastTurnId)
         assertTrue(result.snapshot.urlState("http://100.91.5.116:4318").seenApprovals.containsKey("req1"))
+        assertEquals(1, result.status.runningManagedCount)
+        assertEquals(1, result.status.runningTurnCount)
+        assertEquals(listOf("s1"), result.status.runningSessionLabels)
+        assertEquals(100L, result.status.lastCheckedEpochSeconds)
+        assertEquals(100L, result.status.lastSuccessEpochSeconds)
     }
 
     @Test

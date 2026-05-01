@@ -14,6 +14,7 @@ type Config struct {
 	CodexAutoApprove bool
 	RefreshInterval  time.Duration
 	StateDBPath      string
+	MediaDir         string
 }
 
 func Load() Config {
@@ -24,6 +25,7 @@ func Load() Config {
 		CodexAutoApprove: getBoolEnv("CODEXFLOW_CODEX_AUTO_APPROVE", false),
 		RefreshInterval:  getDurationEnv("CODEXFLOW_REFRESH_INTERVAL", 12*time.Second),
 		StateDBPath:      getenv("CODEXFLOW_STATE_DB_PATH", defaultStateDBPath()),
+		MediaDir:         getenv("CODEXFLOW_MEDIA_DIR", defaultMediaDir()),
 	}
 }
 
@@ -68,4 +70,12 @@ func defaultStateDBPath() string {
 		return "./codexflow-state.db"
 	}
 	return filepath.Join(home, ".codexflow", "state.db")
+}
+
+func defaultMediaDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "./codexflow-media"
+	}
+	return filepath.Join(home, ".codexflow", "media")
 }

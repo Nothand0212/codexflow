@@ -30,7 +30,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:    cfg.ListenAddr,
-		Handler: httpapi.NewServer(agent, logger).Handler(),
+		Handler: httpapi.NewServer(agent, logger, cfg).Handler(),
 	}
 
 	go func() {

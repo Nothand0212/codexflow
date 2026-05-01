@@ -61,6 +61,7 @@ class AppModel extends ChangeNotifier {
   String appVersionName;
   int appBuildNumber;
   DashboardResponse dashboard = DashboardResponse.placeholder();
+  DateTime? lastDashboardRefreshAt;
   List<AgentSkill> skills = const <AgentSkill>[];
   final Map<String, SessionDetail> sessionDetails = <String, SessionDetail>{};
   bool isRefreshing = false;
@@ -174,6 +175,7 @@ class AppModel extends ChangeNotifier {
       final client = _client();
       final latestDashboard = await client.dashboard();
       dashboard = latestDashboard;
+      lastDashboardRefreshAt = DateTime.now();
       _syncSelectedAgent(latestDashboard);
       _consecutiveDashboardFailures = 0;
       isAgentOnline = latestDashboard.agent.connected;

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -316,10 +317,83 @@ func normalizeItem(item map[string]any) TurnItem {
 		result.Title = strings.Title(itemType)
 	}
 
+	result.Media = normalizeItemMedia(item["media"])
+
 	if result.Body == "" {
 		result.Body = summarizeUnknown(item)
 	}
 	return result
+}
+
+func normalizeItemMedia(value any) []ChatMediaAttachment {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+
+	media := make([]ChatMediaAttachment, 0, len(items))
+	for _, item := range items {
+		values, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		id := stringFieldAny(values, "id")
+		kind := stringFieldAny(values, "kind")
+		url := stringFieldAny(values, "url")
+		if id == "" || kind == "" || url == "" {
+			continue
+		}
+
+		media = append(media, ChatMediaAttachment{
+			ID:       id,
+			Kind:     kind,
+			Name:     stringFieldAny(values, "name"),
+			MIMEType: stringFieldAny(values, "mimeType"),
+			URL:      url,
+			Size:     int64(numberFieldAny(values, "size")),
+			Width:    numberFieldAny(values, "width"),
+			Height:   numberFieldAny(values, "height"),
+		})
+	}
+	return media
+}
+
+func numberFieldAny(values map[string]any, key string) int {
+	switch value := values[key].(type) {
+	case int:
+		return value
+	case int8:
+		return int(value)
+	case int16:
+		return int(value)
+	case int32:
+		return int(value)
+	case int64:
+		return int(value)
+	case uint:
+		return int(value)
+	case uint8:
+		return int(value)
+	case uint16:
+		return int(value)
+	case uint32:
+		return int(value)
+	case uint64:
+		return int(value)
+	case float32:
+		return int(value)
+	case float64:
+		return int(value)
+	case json.Number:
+		if parsed, err := value.Int64(); err == nil {
+			return int(parsed)
+		}
+		if parsed, err := value.Float64(); err == nil {
+			return int(parsed)
+		}
+	}
+	return 0
 }
 
 func summarizeUnknown(item map[string]any) string {

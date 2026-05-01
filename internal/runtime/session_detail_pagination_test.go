@@ -65,6 +65,49 @@ func TestSessionDetailPageUsesOffsetFromNewestTurn(t *testing.T) {
 	}
 }
 
+func TestSessionDetailPreservesStructuredItemMedia(t *testing.T) {
+	record := store.SessionRecord{
+		Thread: codex.Thread{
+			ID:            "thread-media",
+			ModelProvider: "OpenAI",
+			CWD:           "/tmp/media",
+			Status:        codex.ThreadStatus{Type: "idle"},
+			Turns: []codex.Turn{
+				{
+					ID:     "turn-media",
+					Status: "completed",
+					Items: []map[string]any{
+						{
+							"id":   "agent-media",
+							"type": "agentMessage",
+							"text": "done",
+							"media": []any{
+								map[string]any{
+									"id":       "media-1",
+									"kind":     "image",
+									"name":     "result.png",
+									"mimeType": "image/png",
+									"url":      "/api/v1/sessions/thread-media/media/media-1",
+									"size":     float64(10),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	detail := toSessionDetail(record, 0)
+	media := detail.Turns[0].Items[0].Media
+	if len(media) != 1 {
+		t.Fatalf("media count = %d, want 1", len(media))
+	}
+	if got, want := media[0].Name, "result.png"; got != want {
+		t.Fatalf("media name = %q, want %q", got, want)
+	}
+}
+
 func testTurns(count int) []codex.Turn {
 	turns := make([]codex.Turn, 0, count)
 	for index := 0; index < count; index++ {

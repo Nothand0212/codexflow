@@ -14,6 +14,20 @@ import 'approval_screen.dart';
 const int _initialTimelineMessageLimit = 80;
 const int _timelineMessagePageSize = 80;
 
+Uri resolveMediaUri(String baseUrl, String url) {
+  final parsed = Uri.tryParse(url);
+  if (parsed != null && parsed.hasScheme) {
+    return parsed;
+  }
+
+  final base = Uri.tryParse(baseUrl);
+  if (base != null && base.hasScheme && parsed != null) {
+    return base.resolveUri(parsed);
+  }
+
+  return Uri(scheme: 'http', host: '127.0.0.1', path: '/invalid-media-url');
+}
+
 class SessionDetailScreen extends StatefulWidget {
   const SessionDetailScreen({super.key, required this.sessionId});
 
@@ -478,6 +492,10 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
                     item.status,
                     '${item.body.length}',
                     '${item.auxiliary.length}',
+                    '${item.media.length}',
+                    item.media
+                        .map((media) => '${media.id}:${media.url}')
+                        .join(';'),
                   ].join(':'),
                 )
                 .join(','),
@@ -668,13 +686,19 @@ class _TimelineItem extends StatelessWidget {
   Widget build(BuildContext context) {
     switch (item.type) {
       case 'userMessage':
-        return _ChatBubble(body: item.body, outgoing: true, title: '你');
+        return _ChatBubble(
+          body: item.body,
+          outgoing: true,
+          title: '你',
+          media: item.media,
+        );
       case 'agentMessage':
         return _ChatBubble(
           body: item.body,
           outgoing: false,
           title: 'Codex',
           markdown: true,
+          media: item.media,
         );
       default:
         return const SizedBox.shrink();
@@ -687,12 +711,14 @@ class _ChatBubble extends StatelessWidget {
     required this.body,
     required this.outgoing,
     required this.title,
+    required this.media,
     this.markdown = false,
   });
 
   final String body;
   final bool outgoing;
   final String title;
+  final List<ChatMediaAttachment> media;
   final bool markdown;
 
   @override
@@ -700,6 +726,7 @@ class _ChatBubble extends StatelessWidget {
     final maxWidth = MediaQuery.of(context).size.width * 0.78;
     final background = outgoing ? Palette.softBlue : Palette.panelStrong;
     final foreground = outgoing ? Colors.white : Palette.ink;
+    final hasBody = body.trim().isNotEmpty;
     final borderRadius = BorderRadius.only(
       topLeft: const Radius.circular(16),
       topRight: const Radius.circular(16),
@@ -729,20 +756,124 @@ class _ChatBubble extends StatelessWidget {
                   color: outgoing ? Colors.white70 : Palette.mutedInk,
                 ),
               ),
-              const SizedBox(height: 5),
-              if (markdown && !outgoing)
-                MarkdownBodyBlock(raw: body)
-              else
-                Text(
-                  body,
-                  style: roundedTextStyle(
-                    size: 13,
-                    weight: FontWeight.w500,
-                    color: foreground,
-                    height: 1.45,
+              if (hasBody) ...<Widget>[
+                const SizedBox(height: 5),
+                if (markdown && !outgoing)
+                  MarkdownBodyBlock(raw: body)
+                else
+                  Text(
+                    body,
+                    style: roundedTextStyle(
+                      size: 13,
+                      weight: FontWeight.w500,
+                      color: foreground,
+                      height: 1.45,
+                    ),
                   ),
-                ),
+              ],
+              _ChatMediaStrip(media: media, hasPrecedingBody: hasBody),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ChatMediaStrip extends StatelessWidget {
+  const _ChatMediaStrip({required this.media, required this.hasPrecedingBody});
+
+  final List<ChatMediaAttachment> media;
+  final bool hasPrecedingBody;
+
+  @override
+  Widget build(BuildContext context) {
+    final images = media.where((item) => item.isImage).toList(growable: false);
+    if (images.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final baseUrl = context.read<AppModel>().baseUrlString;
+    return Padding(
+      padding: EdgeInsets.only(top: hasPrecedingBody ? 10 : 0),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: images
+            .map((item) => _ChatMediaThumbnail(baseUrl: baseUrl, media: item))
+            .toList(growable: false),
+      ),
+    );
+  }
+}
+
+class _ChatMediaThumbnail extends StatelessWidget {
+  const _ChatMediaThumbnail({required this.baseUrl, required this.media});
+
+  final String baseUrl;
+  final ChatMediaAttachment media;
+
+  @override
+  Widget build(BuildContext context) {
+    final uri = resolveMediaUri(baseUrl, media.url);
+    final aspectRatio = media.width > 0 && media.height > 0
+        ? media.width / media.height
+        : null;
+    Widget image = ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Image.network(
+        uri.toString(),
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) => Container(
+          color: Palette.line.appOpacity(0.28),
+          alignment: Alignment.center,
+          child: Icon(
+            Icons.broken_image_rounded,
+            color: Palette.mutedInk.appOpacity(0.72),
+            size: 24,
+          ),
+        ),
+      ),
+    );
+    if (aspectRatio != null) {
+      image = AspectRatio(aspectRatio: aspectRatio, child: image);
+    }
+
+    return GestureDetector(
+      key: ValueKey<String>('chat-media-${media.id}'),
+      onTap: () => _openPreview(context, uri),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 220, maxHeight: 160),
+        child: image,
+      ),
+    );
+  }
+
+  void _openPreview(BuildContext context, Uri uri) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => Dialog(
+        insetPadding: const EdgeInsets.all(20),
+        clipBehavior: Clip.antiAlias,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 900, maxHeight: 720),
+          child: InteractiveViewer(
+            child: Image.network(
+              uri.toString(),
+              key: ValueKey<String>('chat-media-preview-${media.id}'),
+              fit: BoxFit.contain,
+              errorBuilder: (context, error, stackTrace) => Container(
+                width: 320,
+                height: 220,
+                color: Palette.panelStrong,
+                alignment: Alignment.center,
+                child: Icon(
+                  Icons.broken_image_rounded,
+                  color: Palette.mutedInk.appOpacity(0.72),
+                  size: 32,
+                ),
+              ),
+            ),
           ),
         ),
       ),
@@ -978,6 +1109,7 @@ class _ComposerCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isSteering = summary.lastTurnStatus == 'inProgress';
+    final canStopNow = !isSteering || supportsInterruptTurn;
     final accentTone = isSteering ? Palette.accent2 : Palette.accent;
     return ListenableBuilder(
       listenable: promptController,
@@ -1029,18 +1161,22 @@ class _ComposerCard extends StatelessWidget {
                     ),
                   const Spacer(),
                   IconButton(
-                    tooltip: isSteering ? '中断并结束' : '结束会话',
+                    tooltip: canStopNow
+                        ? (isSteering ? '中断并结束' : '结束会话')
+                        : '等待本轮结束',
                     visualDensity: VisualDensity.compact,
                     icon: Icon(
                       isSteering
                           ? Icons.stop_circle_rounded
                           : Icons.stop_circle_outlined,
-                      color: Palette.danger,
+                      color: canStopNow ? Palette.danger : Palette.mutedInk,
                     ),
-                    onPressed: () async {
-                      FocusScope.of(context).unfocus();
-                      await onEnd();
-                    },
+                    onPressed: canStopNow
+                        ? () async {
+                            FocusScope.of(context).unfocus();
+                            await onEnd();
+                          }
+                        : null,
                   ),
                 ],
               ),
@@ -1158,17 +1294,6 @@ class _ComposerCard extends StatelessWidget {
                   ),
                 ],
               ),
-              if (isSteering && !supportsInterruptTurn) ...<Widget>[
-                const SizedBox(height: 8),
-                Text(
-                  '当前 Agent 不支持本轮中断，将等待本轮自然结束。',
-                  style: roundedTextStyle(
-                    size: 12,
-                    weight: FontWeight.w500,
-                    color: Palette.mutedInk,
-                  ),
-                ),
-              ],
             ],
           ),
         );

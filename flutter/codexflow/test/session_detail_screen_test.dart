@@ -84,6 +84,76 @@ void main() {
     expect(find.textContaining('hidden diff'), findsNothing);
   });
 
+  testWidgets(
+    'session detail renders message media thumbnails and opens preview',
+    (WidgetTester tester) async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final prefs = await SharedPreferences.getInstance();
+      final model = _StaticAppModel(prefs);
+      final summary = _sessionSummary();
+      model.dashboard = _dashboard(summary);
+      model.sessionDetails[summary.id] = SessionDetail(
+        summary: summary,
+        turns: <TurnDetail>[_turnWithMedia()],
+      );
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<AppModel>.value(
+          value: model,
+          child: MaterialApp(home: SessionDetailScreen(sessionId: summary.id)),
+        ),
+      );
+      for (var index = 0; index < 6; index += 1) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+
+      expect(
+        find.byKey(const ValueKey<String>('chat-media-media-1')),
+        findsOneWidget,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey<String>('chat-media-media-1')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey<String>('chat-media-preview-media-1')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('session detail does not crash on malformed media base URL', (
+    WidgetTester tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final prefs = await SharedPreferences.getInstance();
+    final model = _StaticAppModel(prefs)..baseUrlString = '://bad-url';
+    final summary = _sessionSummary();
+    model.dashboard = _dashboard(summary);
+    model.sessionDetails[summary.id] = SessionDetail(
+      summary: summary,
+      turns: <TurnDetail>[_turnWithMedia()],
+    );
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider<AppModel>.value(
+        value: model,
+        child: MaterialApp(home: SessionDetailScreen(sessionId: summary.id)),
+      ),
+    );
+    for (var index = 0; index < 6; index += 1) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+
+    expect(tester.takeException(), isNull);
+    expect(
+      find.byKey(const ValueKey<String>('chat-media-media-1')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('session detail initially renders the latest message page', (
     WidgetTester tester,
   ) async {
@@ -269,6 +339,44 @@ void main() {
     expect(inserted, isTrue);
   });
 
+  testWidgets('composer disables stop action when interrupt is unsupported', (
+    WidgetTester tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final prefs = await SharedPreferences.getInstance();
+    final model = _StaticAppModel(prefs);
+    final summary = _sessionSummary(lastTurnStatus: 'inProgress');
+    model.dashboard = _dashboard(summary, supportsInterruptTurn: false);
+    model.sessionDetails[summary.id] = SessionDetail(
+      summary: summary,
+      turns: <TurnDetail>[_userOnlyTurn(summary.lastTurnId)],
+    );
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider<AppModel>.value(
+        value: model,
+        child: MaterialApp(home: SessionDetailScreen(sessionId: summary.id)),
+      ),
+    );
+    for (var index = 0; index < 6; index += 1) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+
+    expect(find.byTooltip('等待本轮结束'), findsOneWidget);
+    expect(find.byTooltip('中断并结束'), findsNothing);
+
+    final stopButton = tester.widget<IconButton>(
+      find.byWidgetPredicate(
+        (widget) => widget is IconButton && widget.tooltip == '等待本轮结束',
+      ),
+    );
+    expect(stopButton.onPressed, isNull);
+
+    await tester.tap(find.byIcon(Icons.stop_circle_rounded));
+    await tester.pump();
+    expect(model.endSessionCalls, 0);
+  });
+
   testWidgets('markdown inline code remains readable on light chat bubbles', (
     WidgetTester tester,
   ) async {
@@ -291,11 +399,18 @@ void main() {
 class _StaticAppModel extends AppModel {
   _StaticAppModel(super.prefs);
 
+  int endSessionCalls = 0;
+
   @override
   Future<void> refreshDashboard({bool refreshSkills = true}) async {}
 
   @override
   Future<void> loadSession(String id) async {}
+
+  @override
+  Future<void> endSession(SessionSummary session) async {
+    endSessionCalls += 1;
+  }
 }
 
 class _PagingAppModel extends _StaticAppModel {
@@ -326,6 +441,7 @@ class _PagingAppModel extends _StaticAppModel {
 DashboardResponse _dashboard(
   SessionSummary summary, {
   List<PendingRequestView> approvals = const <PendingRequestView>[],
+  bool supportsInterruptTurn = true,
 }) {
   return DashboardResponse(
     agent: AgentSnapshot(
@@ -341,7 +457,7 @@ DashboardResponse _dashboard(
         available: true,
         isDefault: true,
         capabilities: AgentCapabilities(
-          supportsInterruptTurn: true,
+          supportsInterruptTurn: supportsInterruptTurn,
           supportsApprovals: true,
           supportsArchive: true,
           supportsResume: true,
@@ -415,6 +531,7 @@ TurnDetail _userOnlyTurn(String id) {
         status: '',
         auxiliary: '',
         metadata: const <String, String>{},
+        media: const <ChatMediaAttachment>[],
       ),
     ],
   );
@@ -440,6 +557,7 @@ TurnDetail _turn(int index) {
         status: '',
         auxiliary: '',
         metadata: const <String, String>{},
+        media: const <ChatMediaAttachment>[],
       ),
       TurnItem(
         id: 'agent-$index',
@@ -449,6 +567,7 @@ TurnDetail _turn(int index) {
         status: '',
         auxiliary: '',
         metadata: const <String, String>{},
+        media: const <ChatMediaAttachment>[],
       ),
     ],
   );
@@ -474,6 +593,7 @@ TurnDetail _turnWithExecutionDetails() {
         status: '',
         auxiliary: '',
         metadata: const <String, String>{},
+        media: const <ChatMediaAttachment>[],
       ),
       TurnItem(
         id: 'reasoning-details',
@@ -483,6 +603,7 @@ TurnDetail _turnWithExecutionDetails() {
         status: '',
         auxiliary: '',
         metadata: const <String, String>{},
+        media: const <ChatMediaAttachment>[],
       ),
       TurnItem(
         id: 'command-details',
@@ -492,6 +613,7 @@ TurnDetail _turnWithExecutionDetails() {
         status: 'completed',
         auxiliary: 'hidden command output',
         metadata: const <String, String>{},
+        media: const <ChatMediaAttachment>[],
       ),
       TurnItem(
         id: 'file-details',
@@ -501,6 +623,7 @@ TurnDetail _turnWithExecutionDetails() {
         status: '',
         auxiliary: '',
         metadata: const <String, String>{},
+        media: const <ChatMediaAttachment>[],
       ),
       TurnItem(
         id: 'agent-details',
@@ -510,6 +633,44 @@ TurnDetail _turnWithExecutionDetails() {
         status: '',
         auxiliary: '',
         metadata: const <String, String>{},
+        media: const <ChatMediaAttachment>[],
+      ),
+    ],
+  );
+}
+
+TurnDetail _turnWithMedia() {
+  return TurnDetail(
+    id: 'turn-media',
+    status: 'completed',
+    startedAt: 1777610500,
+    completedAt: 1777610510,
+    durationMs: 10000,
+    error: '',
+    diff: '',
+    planExplanation: '',
+    plan: const <PlanStep>[],
+    items: <TurnItem>[
+      TurnItem(
+        id: 'user-media',
+        type: 'userMessage',
+        title: '',
+        body: 'attached screenshot',
+        status: '',
+        auxiliary: '',
+        metadata: const <String, String>{},
+        media: <ChatMediaAttachment>[
+          ChatMediaAttachment(
+            id: 'media-1',
+            kind: 'image',
+            name: 'screen.png',
+            mimeType: 'image/png',
+            url: '/api/v1/sessions/session-scroll-test/media/media-1',
+            size: 100,
+            width: 640,
+            height: 360,
+          ),
+        ],
       ),
     ],
   );

@@ -112,14 +112,26 @@ type PlanStep struct {
 	Status string `json:"status"`
 }
 
+type ChatMediaAttachment struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Name     string `json:"name"`
+	MIMEType string `json:"mimeType"`
+	URL      string `json:"url"`
+	Size     int64  `json:"size"`
+	Width    int    `json:"width,omitempty"`
+	Height   int    `json:"height,omitempty"`
+}
+
 type TurnItem struct {
-	ID        string            `json:"id"`
-	Type      string            `json:"type"`
-	Title     string            `json:"title"`
-	Body      string            `json:"body"`
-	Status    string            `json:"status"`
-	Auxiliary string            `json:"auxiliary"`
-	Metadata  map[string]string `json:"metadata"`
+	ID        string                `json:"id"`
+	Type      string                `json:"type"`
+	Title     string                `json:"title"`
+	Body      string                `json:"body"`
+	Status    string                `json:"status"`
+	Auxiliary string                `json:"auxiliary"`
+	Metadata  map[string]string     `json:"metadata"`
+	Media     []ChatMediaAttachment `json:"media"`
 }
 
 type PendingRequestView struct {

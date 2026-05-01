@@ -63,6 +63,7 @@ Client Apps
 - 支持开始新 turn、steer 当前 turn、interrupt 当前 turn
 - 支持结束会话、归档会话
 - 捕获命令审批、文件变更审批、权限审批、结构化用户输入请求
+- 持久化聊天图片附件，并在会话详情中返回可直接渲染的媒体 URL
 - 对外提供 HTTP API 和 SSE 事件流
 
 ### iOS App
@@ -86,8 +87,10 @@ Client Apps
 - 审批中心
 - 设置页 / Agent 地址配置
 - 图片上传与 Skills 插入放在同一条输入工具栏
+- 用户和 Agent 发出的图片会作为聊天消息的一部分持久显示，支持缩略图和预览
 - 启动和刷新时读取本机 Codex CLI 可用的 agent skills，并支持按名称搜索
 - Claude 会话显示 `History / Runtime` 与 `现有 Runtime / 历史新开 / 新建 Runtime` 状态
+- Android 前台常驻通知显示标题、状态细节、刷新/审批等图标动作
 - Android / Web / 桌面端 runner 已补齐
 - 已适配浏览器跨域访问本地 Agent
 
@@ -110,6 +113,7 @@ Client Apps
 - Android 安装包已经发布在 GitHub Releases
 - Web 构建产物也已经发布在 GitHub Releases
 - 如果你只是想直接试用，可以优先从 GitHub Releases 下载对应版本
+- 本地开发时，也可以把 release APK 放到 Flutter Web 静态目录里，通过同一个局域网或 Tailscale 地址下载，例如 `http://<agent-host>:8088/codexflow-android-latest.apk`
 
 ## 当前状态
 
@@ -129,8 +133,8 @@ Client Apps
 - 聊天窗口改为移动 IM 风格：用户和 Agent 使用左右气泡，默认只展示最终回复，隐藏推理和执行细节
 - 聊天记录改为按需加载旧消息，进入会话默认滚动到最新内容，降低长历史会话的卡顿
 - Skills 面板改为动态读取 Codex CLI 本机 skills，按字母排序，并在面板顶部提供搜索框
-- 图片上传和 Skills 入口合并到同一条输入工具栏，适合单手操作
-- Android 前台常驻通知显示更多 Agent 状态信息，便于确认后台监控是否仍在工作
+- 图片上传和 Skills 入口合并到同一条输入工具栏，适合单手操作；图片发送后会写入会话媒体存储，重新打开历史也能看到
+- Android 前台常驻通知显示更多 Agent 状态信息，并提供图标化动作，便于确认后台监控是否仍在工作
 
 当前还没有做的部分：
 
@@ -173,6 +177,13 @@ go run ./cmd/codexflow-agent
 - `CODEXFLOW_CODEX_AUTO_APPROVE`
 - `CODEXFLOW_REFRESH_INTERVAL`
 - `CODEXFLOW_STATE_DB_PATH`
+- `CODEXFLOW_MEDIA_DIR`
+
+默认状态数据库路径是 `~/.codexflow/state.db`，聊天图片媒体默认存储在 `~/.codexflow/media`。如果你希望把图片附件放到单独磁盘或备份目录，可以设置：
+
+```bash
+CODEXFLOW_MEDIA_DIR=/path/to/codexflow-media go run ./cmd/codexflow-agent
+```
 
 如果你的 `codex` 不在系统 `PATH` 里，可以显式指定它：
 
@@ -337,6 +348,21 @@ python3 -m http.server 8080
 http://127.0.0.1:8080
 ```
 
+如果你同时想把 Android APK 放到同一个静态目录下载，可以复制 release 包到 Web 目录：
+
+```bash
+cp flutter/codexflow/build/app/outputs/flutter-apk/app-release.apk \
+  flutter/codexflow/build/web/codexflow-android-latest.apk
+```
+
+然后用手机浏览器打开：
+
+```text
+http://<agent-host>:8080/codexflow-android-latest.apk
+```
+
+其中 `<agent-host>` 可以是局域网 IP，也可以是 Tailscale 分配的 `100.x.y.z` 地址。
+
 其他方式也可以，例如：
 
 - `npx serve build/web`
@@ -378,7 +404,7 @@ http://192.168.1.10:4318
 3. 对历史会话点击“接管到 CodexFlow”，将其转为受控会话。
 4. 在聊天页用气泡流查看上下文；默认只展示最终回复，推理和执行细节不会占据聊天窗口。
 5. 在输入栏发送下一轮 prompt，或在当前 turn 运行中时继续 steer。
-6. 点击 `Skills` 搜索并插入本机 Codex CLI 可用的 agent skill；也可以在同一栏添加图片。
+6. 点击 `Skills` 搜索并插入本机 Codex CLI 可用的 agent skill；也可以在同一栏添加图片。图片会进入聊天记录，重新加载会话时仍会显示。
 7. 打开 `Approvals` 页面，处理等待中的审批请求；对不再需要的会话可以结束或归档。
 
 补充说明：
@@ -402,6 +428,8 @@ http://192.168.1.10:4318
 - `POST /api/v1/sessions/:id/turns/start`
 - `POST /api/v1/sessions/:id/turns/steer`
 - `POST /api/v1/sessions/:id/turns/interrupt`
+- `GET /api/v1/sessions/:id/media/:mediaId`
+- `POST /api/v1/uploads/image`
 - `GET /api/v1/skills`
 - `GET /api/v1/approvals`
 - `POST /api/v1/approvals/:id/resolve`

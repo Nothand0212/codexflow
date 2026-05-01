@@ -1,7 +1,5 @@
 package com.example.codexflow_flutter.monitor
 
-import java.net.URI
-
 class MonitorStateMachine {
     fun evaluate(
         url: String,
@@ -87,8 +85,15 @@ class MonitorStateMachine {
             status = MonitorStatus(
                 online = dashboard.agentConnected,
                 runningManagedCount = managedSessions.size,
+                runningTurnCount = managedSessions.count { it.lastTurnStatus == IN_PROGRESS_STATUS },
                 pendingManualActionCount = filteredApprovals.size,
-                hostPort = hostPort(url),
+                hostPort = MonitorStatusFactory.hostPort(url),
+                runningSessionLabels = managedSessions
+                    .filter { it.lastTurnStatus == IN_PROGRESS_STATUS }
+                    .map { it.displayName }
+                    .take(MAX_RUNNING_LABELS),
+                lastCheckedEpochSeconds = nowEpochSeconds,
+                lastSuccessEpochSeconds = nowEpochSeconds,
             ),
             manualActions = newManualActions,
             turnResults = newTurnResults,
@@ -177,17 +182,12 @@ class MonitorStateMachine {
         values.entries.removeIf { now - it.value > maxAgeSeconds }
     }
 
-    private fun hostPort(url: String): String {
-        return runCatching {
-            val uri = URI(url)
-            if (uri.port > 0) "${uri.host}:${uri.port}" else uri.host.orEmpty()
-        }.getOrDefault(url)
-    }
-
     private fun shortId(value: String): String = if (value.length <= 8) value else value.substring(0, 8)
 
     private companion object {
         const val MANAGED_STAGE = "managed"
+        const val IN_PROGRESS_STATUS = "inProgress"
+        const val MAX_RUNNING_LABELS = 3
         const val SEVEN_DAYS_SECONDS = 7L * 24L * 60L * 60L
         const val THIRTY_DAYS_SECONDS = 30L * 24L * 60L * 60L
     }

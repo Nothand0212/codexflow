@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"codexflow/internal/config"
 	"codexflow/internal/runtime"
 )
 
@@ -21,17 +23,39 @@ type Server struct {
 	logger  *slog.Logger
 	mux     *http.ServeMux
 	uploads *imageUploadStore
+	media   *sessionMediaStore
 }
 
-func NewServer(agent *runtime.Agent, logger *slog.Logger) *Server {
+func NewServer(agent *runtime.Agent, logger *slog.Logger, cfg config.Config) *Server {
 	server := &Server{
 		agent:   agent,
 		logger:  logger,
 		mux:     http.NewServeMux(),
 		uploads: newImageUploadStore(),
+		media:   initializeSessionMediaStore(logger, cfg.MediaDir),
 	}
 	server.routes()
 	return server
+}
+
+func initializeSessionMediaStore(logger *slog.Logger, mediaDir string) *sessionMediaStore {
+	store, err := newSessionMediaStore(mediaDir)
+	if err == nil {
+		return store
+	}
+	if logger != nil {
+		logger.Warn("failed to initialize media store", "dir", mediaDir, "error", err)
+	}
+
+	fallback := filepath.Join(os.TempDir(), "codexflow", "media")
+	store, err = newSessionMediaStore(fallback)
+	if err == nil {
+		return store
+	}
+	if logger != nil {
+		logger.Warn("failed to initialize fallback media store", "dir", fallback, "error", err)
+	}
+	return nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -142,6 +166,15 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	sessionID := parts[0]
 
+	if len(parts) == 3 && parts[1] == "media" {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		s.handleSessionMedia(w, r, sessionID, parts[2])
+		return
+	}
+
 	if len(parts) == 1 {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
@@ -156,6 +189,7 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, err)
 			return
 		}
+		s.overlaySessionMedia(&detail)
 		writeJSON(w, http.StatusOK, detail)
 		return
 	}
@@ -218,13 +252,17 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		input, err := s.buildTurnInput(request.Prompt, request.Inputs)
+		buildResult, err := s.buildTurnInput(request.Prompt, request.Inputs)
 		if err != nil {
 			writeErrorMessage(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		turn, err := s.agent.StartTurn(ctx, sessionID, input)
+		turn, err := s.agent.StartTurn(ctx, sessionID, buildResult.Inputs)
 		if err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		if err := s.attachUploadsToFirstUserMessage(sessionID, &turn, buildResult.Uploads); err != nil {
 			writeError(w, http.StatusBadGateway, err)
 			return
 		}
@@ -249,12 +287,16 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		input, err := s.buildTurnInput(request.Prompt, request.Inputs)
+		buildResult, err := s.buildTurnInput(request.Prompt, request.Inputs)
 		if err != nil {
 			writeErrorMessage(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := s.agent.SteerTurn(ctx, sessionID, request.TurnID, input); err != nil {
+		if err := s.agent.SteerTurn(ctx, sessionID, request.TurnID, buildResult.Inputs); err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		if err := s.attachSteerUploads(ctx, sessionID, request.TurnID, buildResult.Uploads); err != nil {
 			writeError(w, http.StatusBadGateway, err)
 			return
 		}
@@ -300,6 +342,84 @@ func parseNonNegativeInt(value string) int {
 		return 0
 	}
 	return parsed
+}
+
+func (s *Server) handleSessionMedia(w http.ResponseWriter, r *http.Request, sessionID, mediaID string) {
+	if s.media == nil {
+		writeErrorMessage(w, http.StatusNotFound, "media not found")
+		return
+	}
+
+	mediaFile, err := s.media.OpenMedia(sessionID, mediaID)
+	if err != nil {
+		writeErrorMessage(w, http.StatusNotFound, "media not found")
+		return
+	}
+	defer mediaFile.File.Close()
+
+	stat, err := mediaFile.File.Stat()
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+
+	contentType := strings.TrimSpace(mediaFile.Media.MIMEType)
+	if contentType == "" {
+		contentType = detectMediaContentType(mediaFile.File, mediaFile.Media.Name)
+	}
+	if contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+
+	http.ServeContent(w, r, mediaFile.Media.Name, stat.ModTime(), mediaFile.File)
+}
+
+func detectMediaContentType(file *os.File, name string) string {
+	if contentType := mime.TypeByExtension(filepath.Ext(strings.TrimSpace(name))); contentType != "" {
+		return contentType
+	}
+
+	buffer := make([]byte, 512)
+	n, err := file.Read(buffer)
+	_, _ = file.Seek(0, io.SeekStart)
+	if err != nil && err != io.EOF {
+		return ""
+	}
+	if n == 0 {
+		return ""
+	}
+	return http.DetectContentType(buffer[:n])
+}
+
+func (s *Server) overlaySessionMedia(detail *runtime.SessionDetail) {
+	if s.media == nil || detail == nil {
+		return
+	}
+	sessionID := detail.Summary.ID
+	for turnIndex := range detail.Turns {
+		turn := &detail.Turns[turnIndex]
+		for itemIndex := range turn.Items {
+			item := &turn.Items[itemIndex]
+			for _, media := range s.media.MediaForItem(sessionID, turn.ID, item.ID) {
+				if hasMediaAttachment(item.Media, media) {
+					continue
+				}
+				item.Media = append(item.Media, media)
+			}
+		}
+	}
+}
+
+func hasMediaAttachment(existing []runtime.ChatMediaAttachment, candidate runtime.ChatMediaAttachment) bool {
+	for _, media := range existing {
+		if candidate.ID != "" && media.ID == candidate.ID {
+			return true
+		}
+		if candidate.URL != "" && media.URL == candidate.URL {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
@@ -432,6 +552,19 @@ func (s *Server) handleImageUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type turnInputBuildResult struct {
+	Inputs  []map[string]any
+	Uploads []resolvedImageUpload
+}
+
+type resolvedImageUpload struct {
+	ID       string
+	Name     string
+	Path     string
+	Size     int64
+	MIMEType string
+}
+
 func (s *Server) buildTurnInput(
 	legacyPrompt string,
 	inputs []struct {
@@ -439,38 +572,136 @@ func (s *Server) buildTurnInput(
 		Text     string `json:"text"`
 		UploadID string `json:"uploadId"`
 	},
-) ([]map[string]any, error) {
+) (turnInputBuildResult, error) {
 	if len(inputs) == 0 {
 		prompt := strings.TrimSpace(legacyPrompt)
 		if prompt == "" {
-			return nil, fmt.Errorf("prompt or inputs is required")
+			return turnInputBuildResult{}, fmt.Errorf("prompt or inputs is required")
 		}
-		return []map[string]any{composeTextInput(prompt)}, nil
+		return turnInputBuildResult{Inputs: []map[string]any{composeTextInput(prompt)}}, nil
 	}
 
-	result := make([]map[string]any, 0, len(inputs))
+	result := turnInputBuildResult{
+		Inputs:  make([]map[string]any, 0, len(inputs)),
+		Uploads: make([]resolvedImageUpload, 0),
+	}
 	for _, input := range inputs {
 		switch strings.TrimSpace(input.Type) {
 		case "text":
 			text := strings.TrimSpace(input.Text)
 			if text == "" {
-				return nil, fmt.Errorf("text input cannot be empty")
+				return turnInputBuildResult{}, fmt.Errorf("text input cannot be empty")
 			}
-			result = append(result, composeTextInput(text))
+			result.Inputs = append(result.Inputs, composeTextInput(text))
 		case "image":
-			path, err := s.uploads.Resolve(input.UploadID)
+			upload, err := s.uploads.Resolve(input.UploadID)
 			if err != nil {
-				return nil, err
+				return turnInputBuildResult{}, err
 			}
-			result = append(result, map[string]any{
+			result.Inputs = append(result.Inputs, map[string]any{
 				"type": "localImage",
-				"path": path,
+				"path": upload.Path,
+			})
+			result.Uploads = append(result.Uploads, resolvedImageUpload{
+				ID:       upload.ID,
+				Name:     upload.Name,
+				Path:     upload.Path,
+				Size:     upload.Size,
+				MIMEType: detectUploadMIMEType(upload),
 			})
 		default:
-			return nil, fmt.Errorf("unsupported input type %q", input.Type)
+			return turnInputBuildResult{}, fmt.Errorf("unsupported input type %q", input.Type)
 		}
 	}
 	return result, nil
+}
+
+func detectUploadMIMEType(upload imageUpload) string {
+	if file, err := os.Open(upload.Path); err == nil {
+		defer file.Close()
+		buffer := make([]byte, 512)
+		n, readErr := file.Read(buffer)
+		if (readErr == nil || readErr == io.EOF) && n > 0 {
+			if contentType := http.DetectContentType(buffer[:n]); strings.HasPrefix(contentType, "image/") {
+				return contentType
+			}
+		}
+	}
+
+	for _, path := range []string{upload.Name, upload.Path} {
+		if contentType := mime.TypeByExtension(filepath.Ext(strings.TrimSpace(path))); contentType != "" {
+			return contentType
+		}
+	}
+	return ""
+}
+
+func (s *Server) attachUploadsToFirstUserMessage(sessionID string, turn *runtime.TurnDetail, uploads []resolvedImageUpload) error {
+	if s.media == nil || turn == nil || len(uploads) == 0 {
+		return nil
+	}
+	for index := range turn.Items {
+		if turn.Items[index].Type != "userMessage" {
+			continue
+		}
+		if err := s.attachUploadsToItem(sessionID, turn.ID, turn.Items[index].ID, uploads); err != nil {
+			return err
+		}
+		turn.Items[index].Media = s.media.MediaForItem(sessionID, turn.ID, turn.Items[index].ID)
+		return nil
+	}
+	return nil
+}
+
+func (s *Server) attachSteerUploads(ctx context.Context, sessionID, turnID string, uploads []resolvedImageUpload) error {
+	if s.media == nil || len(uploads) == 0 {
+		return nil
+	}
+	detail, err := s.agent.SessionDetailPage(ctx, sessionID, runtime.SessionDetailPageRequest{TurnLimit: runtime.MaxSessionDetailTurnLimit})
+	if err != nil {
+		return err
+	}
+	targetTurnID := strings.TrimSpace(turnID)
+	for turnIndex := len(detail.Turns) - 1; turnIndex >= 0; turnIndex-- {
+		turn := detail.Turns[turnIndex]
+		if targetTurnID != "" && turn.ID != targetTurnID {
+			continue
+		}
+		if itemID, ok := latestUserMessageItemID(turn); ok {
+			return s.attachUploadsToItem(sessionID, turn.ID, itemID, uploads)
+		}
+		return fmt.Errorf("turn %q has no user message for image attachment", turn.ID)
+	}
+	if targetTurnID != "" {
+		return fmt.Errorf("turn %q could not be found for image attachment", targetTurnID)
+	}
+	return nil
+}
+
+func latestUserMessageItemID(turn runtime.TurnDetail) (string, bool) {
+	for index := len(turn.Items) - 1; index >= 0; index-- {
+		if turn.Items[index].Type == "userMessage" {
+			return turn.Items[index].ID, true
+		}
+	}
+	return "", false
+}
+
+func (s *Server) attachUploadsToItem(sessionID, turnID, itemID string, uploads []resolvedImageUpload) error {
+	for _, upload := range uploads {
+		if _, err := s.media.AttachUpload(sessionMediaUpload{
+			SessionID: sessionID,
+			TurnID:    turnID,
+			ItemID:    itemID,
+			Name:      upload.Name,
+			MIMEType:  upload.MIMEType,
+			Path:      upload.Path,
+			Size:      upload.Size,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func composeTextInput(prompt string) map[string]any {

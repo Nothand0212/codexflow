@@ -28,64 +28,8 @@ class AtmosphereBackground extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      fit: StackFit.expand,
-      children: <Widget>[
-        const DecoratedBox(
-          decoration: BoxDecoration(gradient: Palette.dashboardGradient),
-        ),
-        Align(
-          alignment: Alignment.topCenter,
-          child: Container(
-            height: 180,
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                colors: <Color>[
-                  Color.fromRGBO(56, 115, 181, 0.05),
-                  Colors.transparent,
-                ],
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-              ),
-            ),
-          ),
-        ),
-        Positioned(
-          right: -10,
-          top: -120,
-          child: _BlurCircle(color: Palette.accent.appOpacity(0.05), size: 160),
-        ),
-        Positioned(
-          left: -20,
-          top: -40,
-          child: _BlurCircle(
-            color: Palette.accent2.appOpacity(0.05),
-            size: 140,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _BlurCircle extends StatelessWidget {
-  const _BlurCircle({required this.color, required this.size});
-
-  final Color color;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        color: color,
-        shape: BoxShape.circle,
-        boxShadow: <BoxShadow>[
-          BoxShadow(color: color, blurRadius: 20, spreadRadius: 12),
-        ],
-      ),
+    return const DecoratedBox(
+      decoration: BoxDecoration(gradient: Palette.dashboardGradient),
     );
   }
 }

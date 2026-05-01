@@ -46,8 +46,10 @@ class _ApprovalScreenState extends State<ApprovalScreen> {
     return Scaffold(
       backgroundColor: Palette.canvas,
       appBar: AppBar(
-        title: Text('审批',
-            style: roundedTextStyle(size: 17, weight: FontWeight.w600)),
+        title: Text(
+          '审批',
+          style: roundedTextStyle(size: 17, weight: FontWeight.w600),
+        ),
         centerTitle: true,
       ),
       body: PageScaffold(
@@ -85,10 +87,7 @@ class _ApprovalScreenState extends State<ApprovalScreen> {
                   ),
                 )
               else
-                ApprovalList(
-                  approvals: approvals,
-                  showSessionLabel: true,
-                ),
+                ApprovalList(approvals: approvals, showSessionLabel: true),
             ],
           ),
         ),
@@ -135,9 +134,13 @@ class SessionApprovalSheet extends StatelessWidget {
                 child: Scaffold(
                   backgroundColor: Colors.transparent,
                   appBar: AppBar(
-                    title: Text(title,
-                        style: roundedTextStyle(
-                            size: 17, weight: FontWeight.w600)),
+                    title: Text(
+                      title,
+                      style: roundedTextStyle(
+                        size: 17,
+                        weight: FontWeight.w600,
+                      ),
+                    ),
                     centerTitle: true,
                     actions: <Widget>[
                       TextButton(
@@ -145,9 +148,10 @@ class SessionApprovalSheet extends StatelessWidget {
                         child: Text(
                           '关闭',
                           style: roundedTextStyle(
-                              size: 13,
-                              weight: FontWeight.w600,
-                              color: Palette.softBlue),
+                            size: 13,
+                            weight: FontWeight.w600,
+                            color: Palette.softBlue,
+                          ),
                         ),
                       ),
                     ],
@@ -171,7 +175,9 @@ class SessionApprovalSheet extends StatelessWidget {
                           )
                         else
                           ApprovalList(
-                              approvals: approvals, showSessionLabel: false),
+                            approvals: approvals,
+                            showSessionLabel: false,
+                          ),
                       ],
                     ),
                   ),
@@ -292,24 +298,29 @@ class _ApprovalCardBodyState extends State<ApprovalCardBody> {
                   children: <Widget>[
                     Text(
                       _kindTitle(approval.kind),
-                      style:
-                          roundedTextStyle(size: 16, weight: FontWeight.w600),
+                      style: roundedTextStyle(
+                        size: 16,
+                        weight: FontWeight.w600,
+                      ),
                     ),
                     const SizedBox(height: 6),
                     Text(
                       approval.summary,
                       style: roundedTextStyle(
-                          size: 13,
-                          weight: FontWeight.w500,
-                          color: Palette.mutedInk,
-                          height: 1.45),
+                        size: 13,
+                        weight: FontWeight.w500,
+                        color: Palette.mutedInk,
+                        height: 1.45,
+                      ),
                     ),
                     if (widget.showSessionLabel) ...<Widget>[
                       const SizedBox(height: 6),
                       Text(
                         _sessionLabel(model, approval),
-                        style:
-                            roundedTextStyle(size: 12, weight: FontWeight.w500),
+                        style: roundedTextStyle(
+                          size: 12,
+                          weight: FontWeight.w500,
+                        ),
                       ),
                     ],
                     if (approval.reason.isNotEmpty) ...<Widget>[
@@ -317,17 +328,20 @@ class _ApprovalCardBodyState extends State<ApprovalCardBody> {
                       Text(
                         approval.reason,
                         style: roundedTextStyle(
-                            size: 12,
-                            weight: FontWeight.w500,
-                            color: Palette.mutedInk),
+                          size: 12,
+                          weight: FontWeight.w500,
+                          color: Palette.mutedInk,
+                        ),
                       ),
                     ],
                     if (_firstQuestion(approval) != null) ...<Widget>[
                       const SizedBox(height: 6),
                       Text(
                         _firstQuestion(approval)!.question,
-                        style:
-                            roundedTextStyle(size: 12, weight: FontWeight.w500),
+                        style: roundedTextStyle(
+                          size: 12,
+                          weight: FontWeight.w500,
+                        ),
                       ),
                     ],
                   ],
@@ -364,9 +378,9 @@ class _ApprovalCardBodyState extends State<ApprovalCardBody> {
                 onPressed: () async {
                   FocusScope.of(context).unfocus();
                   await context.read<AppModel>().resolve(
-                        approval: widget.approval,
-                        action: ApprovalAction.submitText(option.label),
-                      );
+                    approval: widget.approval,
+                    action: ApprovalAction.submitText(option.label),
+                  );
                 },
               ),
             ),
@@ -384,9 +398,9 @@ class _ApprovalCardBodyState extends State<ApprovalCardBody> {
           onPressed: () async {
             FocusScope.of(context).unfocus();
             await context.read<AppModel>().resolve(
-                  approval: widget.approval,
-                  action: ApprovalAction.submitText(_replyController.text),
-                );
+              approval: widget.approval,
+              action: ApprovalAction.submitText(_replyController.text),
+            );
           },
         ),
       ],
@@ -406,9 +420,9 @@ class _ApprovalCardBodyState extends State<ApprovalCardBody> {
                 foreground: button.foreground,
                 onPressed: () async {
                   await context.read<AppModel>().resolve(
-                        approval: widget.approval,
-                        action: button.action,
-                      );
+                    approval: widget.approval,
+                    action: button.action,
+                  );
                 },
               ),
             ),
@@ -419,9 +433,9 @@ class _ApprovalCardBodyState extends State<ApprovalCardBody> {
 
   String _sessionLabel(AppModel model, PendingRequestView approval) {
     final session = model.dashboard.sessions.cast<SessionSummary?>().firstWhere(
-          (item) => item?.id == approval.threadId,
-          orElse: () => null,
-        );
+      (item) => item?.id == approval.threadId,
+      orElse: () => null,
+    );
     if (session != null) {
       return '会话：${session.displayName}';
     }
@@ -531,11 +545,11 @@ class _ApprovalCardBodyState extends State<ApprovalCardBody> {
   }
 
   List<_ApprovalChoiceButton> _availableDecisionButtons(
-      PendingRequestView approval) {
-    return asList(approval.params['availableDecisions'])
-        .map(_commandDecisionButton)
-        .whereType<_ApprovalChoiceButton>()
-        .toList();
+    PendingRequestView approval,
+  ) {
+    return asList(
+      approval.params['availableDecisions'],
+    ).map(_commandDecisionButton).whereType<_ApprovalChoiceButton>().toList();
   }
 
   _ApprovalChoiceButton? _commandDecisionButton(dynamic decision) {
@@ -582,12 +596,10 @@ class _ApprovalCardBodyState extends State<ApprovalCardBody> {
     final object = asMap(decision);
     if (object.containsKey('acceptWithExecpolicyAmendment')) {
       return _ApprovalChoiceButton(
-        action: ApprovalAction.decision(
-          <String, dynamic>{
-            'acceptWithExecpolicyAmendment':
-                object['acceptWithExecpolicyAmendment'],
-          },
-        ),
+        action: ApprovalAction.decision(<String, dynamic>{
+          'acceptWithExecpolicyAmendment':
+              object['acceptWithExecpolicyAmendment'],
+        }),
         title: '允许并记住这类命令',
         background: Palette.softBlue,
         foreground: Colors.white,
@@ -601,13 +613,11 @@ class _ApprovalCardBodyState extends State<ApprovalCardBody> {
       final action = asString(amendment['action']);
       final isAllow = action == 'allow';
       return _ApprovalChoiceButton(
-        action: ApprovalAction.decision(
-          <String, dynamic>{
-            'applyNetworkPolicyAmendment': <String, dynamic>{
-              'network_policy_amendment': amendment,
-            },
+        action: ApprovalAction.decision(<String, dynamic>{
+          'applyNetworkPolicyAmendment': <String, dynamic>{
+            'network_policy_amendment': amendment,
           },
-        ),
+        }),
         title: isAllow ? '允许并记住 $host' : '拒绝并记住 $host',
         background: isAllow
             ? Palette.softBlue.appOpacity(0.15)
@@ -637,7 +647,7 @@ class _ApprovalCardBodyState extends State<ApprovalCardBody> {
           'accept',
           'acceptForSession',
           'decline',
-          'cancel'
+          'cancel',
         ];
       case 'permissions':
         return const <String>['session', 'turn', 'decline'];

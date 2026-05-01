@@ -640,6 +640,43 @@ class PlanStep {
   }
 }
 
+class ChatMediaAttachment {
+  ChatMediaAttachment({
+    required this.id,
+    required this.kind,
+    required this.name,
+    required this.mimeType,
+    required this.url,
+    required this.size,
+    required this.width,
+    required this.height,
+  });
+
+  final String id;
+  final String kind;
+  final String name;
+  final String mimeType;
+  final String url;
+  final int size;
+  final int width;
+  final int height;
+
+  bool get isImage => kind == 'image' || mimeType.startsWith('image/');
+
+  factory ChatMediaAttachment.fromJson(Map<String, dynamic> json) {
+    return ChatMediaAttachment(
+      id: asString(json['id']),
+      kind: asString(json['kind']),
+      name: asString(json['name']),
+      mimeType: asString(json['mimeType']),
+      url: asString(json['url']),
+      size: asInt(json['size']),
+      width: asInt(json['width']),
+      height: asInt(json['height']),
+    );
+  }
+}
+
 class TurnItem {
   TurnItem({
     required this.id,
@@ -649,6 +686,7 @@ class TurnItem {
     required this.status,
     required this.auxiliary,
     required this.metadata,
+    required this.media,
   });
 
   final String id;
@@ -658,6 +696,7 @@ class TurnItem {
   final String status;
   final String auxiliary;
   final Map<String, String> metadata;
+  final List<ChatMediaAttachment> media;
 
   factory TurnItem.fromJson(Map<String, dynamic> json) {
     return TurnItem(
@@ -670,6 +709,10 @@ class TurnItem {
       metadata: asMap(
         json['metadata'],
       ).map((key, dynamic value) => MapEntry(key, asString(value))),
+      media: asList(json['media'])
+          .map((item) => ChatMediaAttachment.fromJson(asMap(item)))
+          .where((item) => item.id.isNotEmpty && item.url.isNotEmpty)
+          .toList(),
     );
   }
 }
