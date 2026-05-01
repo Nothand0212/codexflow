@@ -4,6 +4,8 @@
 
 Drafted on 2026-05-01 after user review of the design direction.
 
+Revised after review to address Android 15 foreground service limits, service restart behavior, polling backoff, notification identity, test coverage, runtime APK verification, and APK versioning.
+
 ## Context
 
 CodexFlow lets a mobile client control and monitor a local Codex CLI runtime through the Go Agent. The user is currently using CodexFlow through Tailscale from Android and Web.
@@ -28,6 +30,7 @@ Project terms used by this spec are defined in `CONTEXT.md`:
 5. Notify the user with sound when a new manual action is required.
 6. Notify the user with sound when a managed turn completes or is interrupted.
 7. Route notification taps to the relevant CodexFlow screen.
+8. Version the Android APK so the installed build and downloadable artifact can be identified.
 
 ## Non-Goals
 
@@ -37,6 +40,7 @@ Project terms used by this spec are defined in `CONTEXT.md`:
 - No alerts for requests handled by Codex auto-approval.
 - No custom audio file for the first version; Android system notification sound is sufficient.
 - No iOS notification implementation in this spec.
+- No auto-start after device reboot in this version.
 
 ## Confirmed Decisions
 
@@ -51,6 +55,18 @@ Only requests that remain in the Agent pending request queue require manual acti
 ### Background Monitoring
 
 Android must use a foreground service for real background monitoring. Best-effort background polling is not enough for this use case.
+
+The service must not use foreground service type `dataSync`. Android 15 applies a time limit to `dataSync` foreground services for apps targeting Android 15+, which makes it a poor fit for a long-lived monitoring service.
+
+The first version should use foreground service type `specialUse` with an explicit subtype explaining that CodexFlow monitors a user-configured local or Tailscale Agent endpoint. `connectedDevice` is not the first choice because CodexFlow is not managing a direct hardware device connection, and using it would require unrelated connected-device permissions or runtime prerequisites.
+
+The first APK should target Android 15:
+
+```text
+targetSdkVersion = 35
+```
+
+If the installed Flutter stable defaults to a different target SDK, the Android Gradle configuration should override the target explicitly for this release and install the matching Android SDK platform if needed.
 
 ### Monitored Sessions
 
@@ -69,6 +85,13 @@ The first Android notification implementation should poll `/api/v1/dashboard`.
 
 SSE remains a later enhancement for lower latency UI refresh, but it is not required for the first reliable Android background implementation.
 
+Polling must use adaptive intervals:
+
+- app visible and last poll succeeded: 10 seconds
+- app background and last poll succeeded: 30 seconds
+- consecutive failures: exponential backoff of 30 seconds, 60 seconds, then 120 seconds max
+- first success after failure resets the interval to the foreground/background success interval
+
 ### Notification Navigation
 
 Notification taps should deep-link inside the app:
@@ -77,7 +100,7 @@ Notification taps should deep-link inside the app:
 - turn completion/interruption notification: open the matching session detail
 - persistent status notification: open the dashboard
 
-If the app is cold-started from a notification, it must apply the navigation target after `SharedPreferences` and the first dashboard load are ready.
+If the app is cold-started from a notification, it must apply the navigation target after the app shell and `SharedPreferences` are ready. It must not wait for a successful dashboard response before showing the target screen.
 
 ### Notification Channels
 
@@ -141,11 +164,33 @@ Use the existing Android SDK at:
 /home/lin/Android/Sdk
 ```
 
+The current local SDK contains `android-36.1`. The implementation must ensure an Android 15 SDK platform is available for the chosen target:
+
+```text
+platforms;android-35
+```
+
+Build configuration should set a visible app version in `pubspec.yaml`, for example:
+
+```yaml
+version: 0.2.0+2
+```
+
+The semantic version (`0.2.0`) should be visible in the app settings screen. The build number (`2`) should map to Android `versionCode`.
+
 The build should produce a release APK and copy the installable artifact to:
+
+```text
+/home/lin/.local/share/codexflow-web/web/codexflow-android-v0.2.0.apk
+```
+
+Also copy/update a convenience alias:
 
 ```text
 /home/lin/.local/share/codexflow-web/web/codexflow-android-latest.apk
 ```
+
+The Web download directory should include enough information for the user to see the latest APK version and build time.
 
 The existing hot-patched APK should not be treated as the source of truth once a rebuilt APK exists.
 
@@ -170,9 +215,51 @@ The Flutter UI should remain responsible for:
 
 The service and Flutter UI must share the Agent base URL through persistent local storage. The first version can use the existing `SharedPreferences` value `codexflow.baseURL`.
 
+The service must react to Agent URL changes. Either of these designs is acceptable:
+
+1. The service reads the latest stored Agent URL before every poll.
+2. The Flutter UI notifies the service through a method channel when settings save a new Agent URL.
+
+If the Agent URL changes, the service must:
+
+- switch to the new URL without requiring a manual service restart
+- reset the HTTP client state
+- create a fresh baseline for the new URL
+- avoid emitting alerts from the first successful poll against the new URL
+
+### Foreground Service Type and Permissions
+
+The Android manifest must declare a foreground service using `specialUse`.
+
+Required permissions:
+
+```xml
+<uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+```
+
+The service declaration must include:
+
+```xml
+<service
+    android:name=".CodexFlowMonitorService"
+    android:exported="false"
+    android:foregroundServiceType="specialUse">
+    <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="monitor_codexflow_agent_over_user_configured_tailscale_or_lan_url" />
+</service>
+```
+
+Do not declare or use `dataSync` for this monitoring service. `FOREGROUND_SERVICE_DATA_SYNC` is only required if a future implementation deliberately uses `dataSync`, which this spec rejects.
+
+At runtime, the service must call `startForeground` with the matching `FOREGROUND_SERVICE_TYPE_SPECIAL_USE` flag on Android versions that require typed foreground service starts.
+
 ### Polling Loop
 
-The service should poll `/api/v1/dashboard` at a fixed interval. A 10 second interval is the default.
+The service polls `/api/v1/dashboard` using the adaptive interval defined in the Event Source section.
 
 On every poll:
 
@@ -192,16 +279,28 @@ If the Agent cannot be reached:
 
 - persistent notification shows offline
 - alert notifications are not emitted for connection failures in the first version
-- polling continues so the service can recover when Tailscale or network connectivity returns
+- polling continues with exponential backoff so the service can recover when Tailscale or network connectivity returns
+- the persisted snapshot is not discarded
 
 ### Baseline and Deduplication
 
-The service must maintain an in-memory monitoring snapshot.
+The service must persist its monitoring snapshot locally, not only in memory.
+
+The persisted snapshot should be keyed by Agent URL and contain:
+
+- initialized/baselined state
+- seen approval ids
+- last observed managed turn status by `session.id + lastTurnId`
+- last successful dashboard timestamp
+- last known running managed session count
+- last known pending manual action count
 
 On service start:
 
-- first successful dashboard response becomes the baseline
-- no alert notifications are emitted from that first response
+- if a persisted snapshot exists for the current Agent URL, compare the first successful dashboard response against it and notify for new eligible events
+- if no persisted snapshot exists for the current Agent URL, the first successful dashboard response becomes the baseline and emits no alert notifications
+
+This prevents system-kill-and-restart cycles from swallowing events that happened while the service was down.
 
 Manual action alerts are deduplicated by `approval.id`.
 
@@ -217,6 +316,8 @@ Only these statuses produce turn result alerts:
 - `interrupted`
 
 If a turn status is missing or empty, no alert should be emitted.
+
+Persisted snapshot data should be pruned so it cannot grow forever. Approval ids and turn result keys older than 7 days can be dropped.
 
 ### History Session List Fix
 
@@ -272,22 +373,47 @@ Persistent notification payload:
 
 The app should introduce a navigation target abstraction so notifications can switch the bottom tab and open session detail after startup.
 
-### Android Permissions
+Cold-start routing must not depend on a successful dashboard fetch before showing UI:
 
-The Android manifest should include:
+1. Start the app shell.
+2. Apply the notification target immediately.
+3. Show loading state for target-specific data.
+4. If dashboard/session loading fails, keep the user on the target screen and show the existing connection error state.
+5. If the target approval no longer exists, show the approval list with a short in-app notice.
+6. If the target session cannot be loaded, show the dashboard with a short in-app notice.
 
-- `android.permission.INTERNET`
-- `android.permission.POST_NOTIFICATIONS`
-- `android.permission.FOREGROUND_SERVICE`
-- foreground service type permission required by the selected service type on Android 14+
+### Notification Identity and Batching
 
-The foreground service declaration should include an explicit `foregroundServiceType`. `dataSync` is the closest fit for polling the local Agent.
+Use stable notification ids:
+
+```text
+persistent_status = 1000
+manual_action_alert = 2000
+turn_result_alert = 3000
+```
+
+The persistent status notification always updates id `1000`.
+
+For alert notifications, each poll cycle emits at most:
+
+- one manual action notification
+- one turn result notification
+
+If exactly one new manual action is detected, notification id `2000` targets that approval. If multiple new manual actions are detected in the same poll, notification id `2000` says how many require attention and opens the approval list.
+
+If exactly one new turn result is detected, notification id `3000` targets that session detail. If multiple turn results are detected in the same poll, notification id `3000` summarizes the count and opens the dashboard.
+
+Repeated polls for the same approval id or same `session.id + lastTurnId + lastTurnStatus` must update state without re-alerting.
+
+### Android Notification Permission
 
 The app should request notification permission at runtime on Android 13+ before alert notifications are expected to work. If the user denies notification permission:
 
 - foreground service still needs a persistent notification where Android requires it
 - alert notifications may not be visible
 - the app should show an in-app settings notice rather than failing silently
+
+The monitoring service can still run, but the settings screen must show that alert notifications are disabled until the permission is granted.
 
 ### Flutter and Native Boundary
 
@@ -312,6 +438,7 @@ If plugin compatibility is poor, prefer a small Kotlin implementation over fight
 The settings screen should expose notification/monitoring status:
 
 - Agent URL
+- app version and build number
 - background monitoring enabled/disabled
 - notification permission status
 - foreground service running status
@@ -319,6 +446,8 @@ The settings screen should expose notification/monitoring status:
 The first version starts monitoring automatically after the app launches, and the user can stop it from settings.
 
 It does not auto-start after device reboot in this version.
+
+Changing the Agent URL in settings must reconfigure the monitoring service without requiring the user to force-stop the app.
 
 ### Alert Text
 
@@ -353,11 +482,18 @@ Add tests for:
 
 - `discovered` sessions are included in the history group.
 - manual action alerts are not emitted for the initial baseline.
+- persisted snapshots are loaded on service restart and new events since the previous snapshot are not swallowed.
 - manual action alerts are emitted for new pending approvals in managed sessions.
 - manual action alerts are not emitted for approvals belonging to non-managed sessions.
 - turn result alerts are emitted for new completed/interrupted managed turns.
 - duplicate polling responses do not re-emit the same alert.
 - persistent notification summary counts online/offline, running managed sessions, and pending manual actions.
+- Agent URL changes reset the baseline for the new URL and stop polling the old URL.
+- network failures use 30/60/120 second backoff and success resets the interval.
+- foreground/background app visibility changes switch between 10 second and 30 second success intervals.
+- notification permission denied state is surfaced without crashing monitoring.
+- notification tap routing handles cold start, dashboard load failure, missing approval, and missing session.
+- notification id and batching logic emits at most one manual action alert and one turn result alert per poll.
 
 ### Go Tests
 
@@ -379,34 +515,73 @@ Then verify:
 
 - release APK exists
 - APK manifest contains network, notification, and foreground service permissions
-- APK AOT artifact contains evidence of the `discovered` history handling
+- APK manifest declares foreground service type `specialUse` and does not declare the monitoring service as `dataSync`
 - APK installs on the Android device
 - Android app can connect to `http://100.91.5.116:4318`
-- dashboard shows historical session list, not just total count
+- dashboard shows discovered historical sessions in the history list, not just the total count
 - foreground service persistent notification appears
 - new manual action emits a sound notification
 - managed turn completion/interruption emits a sound notification
 - notification taps route to the expected screen
+- settings shows app version and build number
 
 ## Rollout
 
 1. Build and test locally.
-2. Publish APK to the local Web directory as `codexflow-android-latest.apk`.
-3. Keep the old hot-patched APK available only as a fallback.
-4. User installs the new APK on Android.
-5. Verify with Tailscale Agent URL:
+2. Publish the versioned APK to the local Web directory as `codexflow-android-v0.2.0.apk`.
+3. Update `codexflow-android-latest.apk` to the same file contents for convenience.
+4. Update the local Web download page or static metadata so the user can see the APK version, build number, build time, and SHA256.
+5. Keep the old hot-patched APK available only as a fallback.
+6. User installs the new APK on Android.
+7. Verify with Tailscale Agent URL:
 
 ```text
 http://100.91.5.116:4318
 ```
 
+## Versioning
+
+The implementation must bump `flutter/codexflow/pubspec.yaml` from the current `0.1.0+1` before producing the APK.
+
+The first notification-capable Android APK should use:
+
+```text
+0.2.0+2
+```
+
+Artifact naming:
+
+```text
+codexflow-android-v0.2.0.apk
+codexflow-android-latest.apk
+```
+
+The settings screen should display:
+
+```text
+CodexFlow 0.2.0 (2)
+```
+
+The local Web download directory should include a small metadata file, such as:
+
+```json
+{
+  "version": "0.2.0",
+  "buildNumber": 2,
+  "artifact": "codexflow-android-v0.2.0.apk",
+  "sha256": "<computed during rollout>",
+  "builtAt": "2026-05-01T..."
+}
+```
+
 ## Risks
 
-- Android battery optimization may still stop background network work on some devices. The settings screen should surface foreground service state and can later link to battery optimization settings.
+- Android battery optimization can still stop background network work on some devices. This version mitigates that with a foreground service, adaptive polling intervals, visible service state, and explicit offline recovery.
 - Notification permission denial on Android 13+ prevents alert notifications. The app must make that state visible.
 - Tailscale connectivity changes may cause temporary offline status. The service should recover through polling.
 - Android notification channel sound settings are sticky. Channel ids should change if sound behavior needs to change later.
 - Foreground service policy differs by Android version. The implementation must verify manifest permissions and service type against the target SDK used by Flutter.
+- `specialUse` is appropriate for local sideloaded builds but would require careful Play Console declaration if CodexFlow is later distributed through Google Play.
 
 ## Future Work
 
