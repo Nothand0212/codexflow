@@ -8,6 +8,8 @@ Revised after review to address Android 15 foreground service limits, service re
 
 Second revision clarifies approval-to-session mapping, snapshot persistence format, timeout behavior, monitor stop semantics, low-version Android compatibility, repeated notification alerts, URL snapshot cleanup, and release shrinking constraints.
 
+Third revision clarifies foreground/background visibility signaling, poll-based missed-event limits, batch notification copy, synchronous snapshot writes, APK metadata path, Web download link updates, pending-count precedence, and notification permission timing.
+
 ## Context
 
 CodexFlow lets a mobile client control and monitor a local Codex CLI runtime through the Go Agent. The user is currently using CodexFlow through Tailscale from Android and Web.
@@ -101,6 +103,17 @@ Polling must use adaptive intervals:
 - app background and last poll succeeded: 30 seconds
 - consecutive failures: exponential backoff of 30 seconds, 60 seconds, then 120 seconds max
 - first success after failure resets the interval to the foreground/background success interval
+
+The monitoring service gets app visibility from Flutter. `HomeShell` or an equivalent app-level widget should implement `WidgetsBindingObserver` and send lifecycle changes to the native monitor through the same method-channel boundary used for monitor configuration:
+
+```text
+resumed -> visible
+inactive / paused / hidden / detached -> background
+```
+
+Kotlin `ProcessLifecycleOwner` is not the first-version source of truth because the existing app state and Agent URL live in Flutter, and keeping lifecycle/config signals in the same Flutter-to-native boundary is simpler to test. If a plugin supplies equivalent foreground/background callbacks, the implementation can wrap them behind the same monitor-facing interface.
+
+Because the first version polls dashboard summaries instead of consuming a full event stream, it can only alert for the latest state visible at each poll. If a managed session completes turn A, starts turn B, and completes turn B between two polls, the monitor may only alert for turn B. This is an accepted limitation of the poll-based first version and is one reason SSE/event-stream monitoring remains future work.
 
 ### Notification Navigation
 
@@ -202,6 +215,14 @@ Also copy/update a convenience alias:
 
 The Web download directory should include enough information for the user to see the latest APK version and build time.
 
+Do not reuse Flutter Web's generated `version.json` for APK metadata because Flutter builds can overwrite it. Publish Android APK metadata to:
+
+```text
+/home/lin/.local/share/codexflow-web/web/codexflow-android-latest.json
+```
+
+If the Web UI or static `index.html` has a hard-coded Android APK download link, update it to point at `codexflow-android-latest.apk` and display or link the version metadata. The new versioned APK must be reachable from the same Web directory where `index.html` is served.
+
 The existing hot-patched APK should not be treated as the source of truth once a rebuilt APK exists.
 
 ### Android Monitoring Service
@@ -259,6 +280,8 @@ Managed-session notification filtering must therefore use a two-step process:
 2. Filter `dashboard.approvals` to approvals whose `approval.threadId` is in that managed session id set.
 
 Pending manual action count means the count of this filtered approval list, not the raw global approvals length.
+
+If `SessionSummary.pendingApprovals` disagrees with the filtered approval list, notification logic must trust the filtered approval list. The filtered list carries stable approval ids for routing and deduplication; `SessionSummary.pendingApprovals` is only a display summary and can be stale during dashboard races or auto-approval transitions.
 
 ### Foreground Service Type and Permissions
 
@@ -329,6 +352,8 @@ codexflow.monitor.snapshot.v1
 ```
 
 This is acceptable because the data is small: a handful of URL snapshots containing approval ids, turn keys, timestamps, and counters. Do not write the snapshot on a tight timer; write only after a poll changes snapshot state.
+
+Use synchronous SharedPreferences writes for the snapshot. On Android native code this means `commit()` rather than `apply()`. The snapshot is part of notification deduplication state, so accepting an asynchronous-write loss window would cause duplicate or missed alerts after process death.
 
 The JSON object should be keyed by Agent URL. Each URL entry contains:
 
@@ -489,6 +514,13 @@ The app should request notification permission at runtime on Android 13+ before 
 
 The monitoring service can still run, but the settings screen must show that alert notifications are disabled until the permission is granted.
 
+Permission request timing:
+
+- Do not request notification permission on first app launch.
+- Request it when the user first enables or starts background monitoring, after the Agent URL is configured.
+- If monitoring starts automatically after app launch and permission has never been requested, show an in-app prompt explaining that CodexFlow needs notification permission for manual action and turn result alerts; the prompt action triggers the Android permission request.
+- If permission is denied, continue monitoring and keep the settings warning visible.
+
 ### Flutter and Native Boundary
 
 Two implementation choices are acceptable:
@@ -553,6 +585,13 @@ CodexFlow needs your action
 <session label> has a pending approval
 ```
 
+Multiple manual actions in one poll:
+
+```text
+CodexFlow needs your action
+<count> pending approvals need review
+```
+
 Turn completed:
 
 ```text
@@ -567,6 +606,25 @@ CodexFlow task interrupted
 <session label> was interrupted
 ```
 
+Multiple turn results in one poll:
+
+```text
+CodexFlow tasks updated
+<completed count> completed · <interrupted count> interrupted
+```
+
+If either count is zero, omit that segment. Examples:
+
+```text
+CodexFlow tasks updated
+3 completed
+```
+
+```text
+CodexFlow tasks updated
+2 interrupted
+```
+
 Session label should prefer the same display logic as the dashboard: explicit name, agent nickname, directory name, preview title, then short id.
 
 ## Testing Strategy
@@ -577,8 +635,10 @@ Add tests for:
 
 - `discovered` sessions are included in the history group.
 - global `DashboardResponse.approvals` are associated to sessions through `PendingRequestView.threadId == SessionSummary.id`.
+- filtered approval list count takes precedence over `SessionSummary.pendingApprovals` when they disagree.
 - manual action alerts are not emitted for the initial baseline.
 - persisted snapshots are loaded on service restart and new events since the previous snapshot are not swallowed.
+- persisted snapshot writes use synchronous commit semantics.
 - persisted snapshot JSON records timestamps for approval ids and turn result keys, then prunes entries older than 7 days.
 - persisted snapshot JSON prunes URL entries whose `lastUsedAt` is older than 30 days.
 - manual action alerts are emitted for new pending approvals in managed sessions.
@@ -587,12 +647,14 @@ Add tests for:
 - duplicate polling responses do not re-emit the same alert.
 - persistent notification summary counts online/offline, running managed sessions, and pending manual actions.
 - Agent URL changes reset the baseline for the new URL and stop polling the old URL.
+- Flutter lifecycle changes notify the monitor of visible/background state through the method-channel boundary.
 - network failures and 15 second HTTP timeouts use 30/60/120 second backoff, and success resets the interval.
 - foreground/background app visibility changes switch between 10 second and 30 second success intervals.
 - stopping monitoring stops polling, stops the foreground service, and removes the persistent notification.
 - notification permission denied state is surfaced without crashing monitoring.
 - notification tap routing handles cold start, dashboard load failure, missing approval, and missing session.
 - notification id and batching logic emits at most one manual action alert and one turn result alert per poll.
+- batch notification text is deterministic for multiple manual actions and multiple turn results.
 - new events that update alert notification ids `2000` or `3000` re-alert rather than silently updating.
 
 ### Go Tests
@@ -626,6 +688,8 @@ Then verify:
 - managed turn completion/interruption emits a sound notification
 - notification taps route to the expected screen
 - settings shows app version and build number
+- Web download page or static index links to `codexflow-android-latest.apk`
+- Android APK metadata exists at `codexflow-android-latest.json`, not Flutter Web's generated `version.json`
 
 ### Android Service Verification
 
@@ -688,11 +752,20 @@ The local Web download directory should include a small metadata file, such as:
 }
 ```
 
+Write that metadata to:
+
+```text
+/home/lin/.local/share/codexflow-web/web/codexflow-android-latest.json
+```
+
+Do not write APK metadata to Flutter Web's generated `version.json`.
+
 ## Risks
 
 - Android battery optimization can still stop background network work on some devices. This version mitigates that with a foreground service, adaptive polling intervals, visible service state, and explicit offline recovery.
 - Notification permission denial on Android 13+ prevents alert notifications. The app must make that state visible.
 - Tailscale connectivity changes may cause temporary offline status. The service should recover through polling.
+- Polling dashboard summaries can miss intermediate turn results when multiple turns start and finish between two polls. This is accepted for the first version and should be revisited with SSE/event-stream monitoring.
 - Android notification channel sound settings are sticky. Channel ids should change if sound behavior needs to change later.
 - Foreground service policy differs by Android version. The implementation must verify manifest permissions and service type against the target SDK used by Flutter.
 - `specialUse` is appropriate for local sideloaded builds but would require careful Play Console declaration if CodexFlow is later distributed through Google Play.
