@@ -366,15 +366,15 @@ On every poll:
    - pending manual action count from the filtered approvals
    - approval ids from the filtered approvals
    - last turn id/status by managed session
-6. Check sessions that existed as managed sessions in the previous snapshot but are no longer managed in the current dashboard. If the current dashboard still contains one of those sessions in `ended`, `history_only`, `discovered`, or `runtime_available` and its `lastTurnStatus` has newly become `completed` or `interrupted`, emit the turn result alert once.
+6. Check sessions that existed as managed sessions in the previous snapshot but are no longer managed in the current dashboard. If the current dashboard still contains one of those sessions in `ended`, `history_only`, `discovered`, or `runtime_available` and its `lastTurnStatus` has newly become `completed` or `interrupted`, collect it into `newTurnResults`.
    - Build the normal `turnResultKey`.
-   - If `seenTurnResults` already contains that key, do not alert.
-   - If an alert is emitted, immediately add that key to `seenTurnResults`.
+   - If `seenTurnResults` already contains that key, do not collect it.
+   - If the result is collected, immediately add that key to `seenTurnResults`.
    - Remove that session from `managedTurnState` before persisting the next snapshot.
-   - If the session no longer exists anywhere in the current dashboard, do not alert because the final status cannot be confirmed.
+   - If the session no longer exists anywhere in the current dashboard, do not collect it because the final status cannot be confirmed.
 7. Update the persistent status notification.
-8. Compare current state with the previous snapshot.
-9. Emit alert notifications only for new eligible transitions.
+8. Compare current managed session state with the previous snapshot and collect any new managed turn results into the same `newTurnResults` collection.
+9. Build `newManualActions` from filtered approvals and apply notification batching once per collection. Emit at most one manual action notification and at most one turn result notification for the whole poll cycle.
 10. Store the current snapshot as the next baseline.
 
 If the dashboard response is valid and contains empty `sessions` and `approvals`, treat it as an online empty state:
@@ -722,7 +722,8 @@ Add tests for:
 - global `DashboardResponse.approvals` are associated to sessions through `PendingRequestView.threadId == SessionSummary.id`.
 - filtered approval list count takes precedence over `SessionSummary.pendingApprovals` when they disagree.
 - managed sessions that move out of `managed` between polls still produce one turn result alert if their current dashboard summary has a newly completed/interrupted last turn.
-- transition-final turn alerts are written to `seenTurnResults` immediately and removed from `managedTurnState` before the next snapshot is persisted.
+- transition-final turn results are collected into the same `newTurnResults` collection as managed-session turn results, then batched once per poll.
+- collected transition-final turn results are written to `seenTurnResults` immediately and removed from `managedTurnState` before the next snapshot is persisted.
 - `managedTurnState` is pruned to current managed session ids after each successful poll.
 - fresh baselines populate `managedTurnState` from current managed sessions.
 - sessions that disappear entirely from dashboard do not emit final turn result alerts.
