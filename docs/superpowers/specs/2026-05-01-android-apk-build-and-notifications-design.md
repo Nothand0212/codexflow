@@ -14,6 +14,8 @@ Fourth revision clarifies notification tap routing for cold and warm starts, for
 
 Fifth revision adds release signing strategy, final-turn notification handling when a session leaves `managed`, manual-stop persistence ordering, metadata generation requirements, empty-dashboard behavior, and rollout command requirements.
 
+Sixth revision reconciles the final-turn transition exception with monitored-session rules, adds dedupe/pruning requirements for `managedTurnState`, adds manual-stop-then-resume device verification, and makes release keystore generation non-interactive.
+
 ## Context
 
 CodexFlow lets a mobile client control and monitor a local Codex CLI runtime through the Go Agent. The user is currently using CodexFlow through Tailscale from Android and Web.
@@ -44,7 +46,7 @@ Project terms used by this spec are defined in `CONTEXT.md`:
 
 - No public relay, cloud push service, FCM, APNs, or device pairing.
 - No SSE-based Android background connection in this iteration.
-- No notification alerts for historical, discovered, or ended sessions unless they are resumed into a managed session and receive new events.
+- No notification alerts for historical, discovered, or ended sessions unless they are resumed into a managed session and receive new events, or unless they were managed in the previous poll and their final turn result became visible during the transition out of `managed`.
 - No alerts for requests handled by Codex auto-approval.
 - No custom audio file for the first version; Android system notification sound is sufficient.
 - No iOS notification implementation in this spec.
@@ -86,7 +88,7 @@ If the installed Flutter stable defaults to a different target SDK, the Android 
 
 ### Monitored Sessions
 
-Only currently managed sessions are eligible for alert notifications.
+Only currently managed sessions are eligible for alert notifications, with one explicit exception: a session that was managed in the previous poll and just transitioned out of `managed` in the current poll can emit one final turn result alert if its final `lastTurnStatus` is now `completed` or `interrupted`.
 
 When monitoring starts, the Android app must build a baseline from the current dashboard and must not notify for:
 
@@ -94,6 +96,8 @@ When monitoring starts, the Android app must build a baseline from the current d
 - already completed turns
 - already interrupted turns
 - historical `history_only`, `discovered`, or `ended` sessions
+
+The transition exception only applies to sessions that were already observed as managed after monitoring started.
 
 ### Event Source
 
@@ -375,6 +379,10 @@ On every poll:
    - approval ids from the filtered approvals
    - last turn id/status by managed session
 6. Check sessions that existed as managed sessions in the previous snapshot but are no longer managed in the current dashboard. If the current dashboard still contains one of those sessions in `ended`, `history_only`, `discovered`, or `runtime_available` and its `lastTurnStatus` has newly become `completed` or `interrupted`, emit the turn result alert once.
+   - Build the normal `turnResultKey`.
+   - If `seenTurnResults` already contains that key, do not alert.
+   - If an alert is emitted, immediately add that key to `seenTurnResults`.
+   - Remove that session from `managedTurnState` before persisting the next snapshot.
 7. Update the persistent status notification.
 8. Compare current state with the previous snapshot.
 9. Emit alert notifications only for new eligible transitions.
@@ -387,6 +395,8 @@ If the dashboard response is valid and contains empty `sessions` and `approvals`
 - existing seen approval/turn keys are retained
 
 If the Agent restarts and sessions temporarily disappear, this must not cause duplicate notifications when those sessions reappear.
+
+At the end of every successful poll, after the transition check runs, `managedTurnState` should contain only current managed session ids. Remove entries for sessions that are no longer managed, including sessions that disappeared from the dashboard entirely.
 
 If the Agent cannot be reached:
 
@@ -721,6 +731,8 @@ Add tests for:
 - global `DashboardResponse.approvals` are associated to sessions through `PendingRequestView.threadId == SessionSummary.id`.
 - filtered approval list count takes precedence over `SessionSummary.pendingApprovals` when they disagree.
 - managed sessions that move out of `managed` between polls still produce one turn result alert if their current dashboard summary has a newly completed/interrupted last turn.
+- transition-final turn alerts are written to `seenTurnResults` immediately and removed from `managedTurnState` before the next snapshot is persisted.
+- `managedTurnState` is pruned to current managed session ids after each successful poll.
 - valid empty dashboards show online running 0 pending 0 and do not clear deduplication state or duplicate later notifications.
 - manual action alerts are not emitted for the initial baseline.
 - persisted snapshots are loaded on service restart and new events since the previous snapshot are not swallowed.
@@ -774,7 +786,8 @@ keytool -genkeypair \
   -alias codexflow \
   -keyalg RSA \
   -keysize 2048 \
-  -validity 10000
+  -validity 10000 \
+  -dname "CN=CodexFlow, O=Local, L=Local, C=US"
 ```
 
 The implementation may wrap APK copy and metadata generation in a script, but metadata must be generated by command, not hand-edited. After build:
@@ -812,6 +825,7 @@ Verify on device or emulator:
 
 - start monitoring from settings and confirm the foreground service notification appears
 - stop monitoring from settings and confirm polling stops, the foreground service stops, and the persistent notification disappears
+- stop monitoring from settings, wait for at least one poll interval while new events occur, re-enable monitoring, and confirm no backfill alerts are emitted for events that occurred while monitoring was stopped
 - restart the app after stopping monitoring and confirm it cold-starts cleanly
 - kill the app process while monitoring is running, relaunch, and confirm persisted snapshot state is loaded
 - change Agent URL while monitoring is running and confirm subsequent polls use the new URL
