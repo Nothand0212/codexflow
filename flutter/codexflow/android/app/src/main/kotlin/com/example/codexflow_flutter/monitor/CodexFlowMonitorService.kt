@@ -1,0 +1,206 @@
+package com.example.codexflow_flutter.monitor
+
+import android.app.NotificationManager
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.IBinder
+import androidx.core.app.NotificationManagerCompat
+import java.net.URI
+
+class CodexFlowMonitorService : Service() {
+    private lateinit var notifications: CodexFlowNotifications
+    private lateinit var snapshotStore: MonitorSnapshotStore
+    private val dashboardClient = DashboardClient()
+    private val stateMachine = MonitorStateMachine()
+    private var workerThread: HandlerThread? = null
+    private var workerHandler: Handler? = null
+    private var visible = false
+    private var running = false
+    private var polling = false
+    private var consecutiveFailures = 0
+    private var lastUrl = ""
+    private var lastStatus: MonitorStatus? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        notifications = CodexFlowNotifications(this)
+        notifications.ensureChannels()
+        snapshotStore = MonitorSnapshotStore(this)
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startAsForeground()
+        when (intent?.action) {
+            ACTION_STOP -> stopMonitor()
+            ACTION_SET_VISIBILITY -> {
+                visible = intent.getBooleanExtra(EXTRA_VISIBLE, visible)
+                startMonitorLoop()
+            }
+            ACTION_START, null -> startMonitorLoop()
+            else -> startMonitorLoop()
+        }
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        running = false
+        workerHandler?.removeCallbacksAndMessages(null)
+        workerThread?.quitSafely()
+        workerHandler = null
+        workerThread = null
+        super.onDestroy()
+    }
+
+    private fun startAsForeground() {
+        val notification = notifications.persistent(null)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                CodexFlowNotifications.ID_PERSISTENT,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } else {
+            startForeground(CodexFlowNotifications.ID_PERSISTENT, notification)
+        }
+    }
+
+    private fun startMonitorLoop() {
+        if (workerThread == null) {
+            workerThread = HandlerThread("CodexFlowMonitor").also { it.start() }
+            workerHandler = Handler(workerThread!!.looper)
+        }
+        if (running) return
+        running = true
+        workerHandler?.post { pollOnce() }
+    }
+
+    private fun pollOnce() {
+        if (!running || polling) return
+        polling = true
+        val currentUrl = readBaseUrl()
+        try {
+            val dashboard = dashboardClient.fetch(currentUrl)
+            val previous = snapshotStore.load()
+            val forceFreshBaseline = currentUrl != lastUrl || !previous.urlState(currentUrl).initialized
+            val decision = stateMachine.evaluate(
+                url = currentUrl,
+                previous = previous,
+                dashboard = dashboard,
+                nowEpochSeconds = System.currentTimeMillis() / 1000L,
+                forceFreshBaseline = forceFreshBaseline,
+            )
+            snapshotStore.save(decision.snapshot)
+            lastUrl = currentUrl
+            lastStatus = decision.status
+            consecutiveFailures = 0
+            notifyPersistent(decision.status)
+            if (decision.manualActions.isNotEmpty()) {
+                notify(CodexFlowNotifications.ID_MANUAL, notifications.manualAction(decision.manualActions))
+            }
+            if (decision.turnResults.isNotEmpty()) {
+                notify(CodexFlowNotifications.ID_TURN, notifications.turnResult(decision.turnResults))
+            }
+            scheduleNext(if (visible) SUCCESS_VISIBLE_MS else SUCCESS_BACKGROUND_MS)
+        } catch (_: Exception) {
+            consecutiveFailures = (consecutiveFailures + 1).coerceAtMost(3)
+            notifyPersistent(offlineStatus(currentUrl))
+            scheduleNext(failureBackoffMs())
+        } finally {
+            polling = false
+        }
+    }
+
+    private fun stopMonitor() {
+        running = false
+        workerHandler?.removeCallbacksAndMessages(null)
+        val url = readBaseUrl()
+        snapshotStore.markManuallyStopped(url)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+        stopSelf()
+    }
+
+    private fun scheduleNext(delayMs: Long) {
+        if (!running) return
+        workerHandler?.postDelayed({ pollOnce() }, delayMs)
+    }
+
+    private fun notifyPersistent(status: MonitorStatus) {
+        notify(CodexFlowNotifications.ID_PERSISTENT, notifications.persistent(status))
+    }
+
+    private fun notify(id: Int, notification: android.app.Notification) {
+        try {
+            NotificationManagerCompat.from(this).notify(id, notification)
+        } catch (_: SecurityException) {
+            if (id == CodexFlowNotifications.ID_PERSISTENT) {
+                try {
+                    val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    manager.notify(id, notification)
+                } catch (_: SecurityException) {
+                    // Android 13+ may reject notification updates until permission is granted.
+                }
+            }
+        }
+    }
+
+    private fun offlineStatus(currentUrl: String): MonitorStatus {
+        val prior = lastStatus
+        return MonitorStatus(
+            online = false,
+            runningManagedCount = prior?.runningManagedCount ?: 0,
+            pendingManualActionCount = prior?.pendingManualActionCount ?: 0,
+            hostPort = hostPort(currentUrl),
+        )
+    }
+
+    private fun failureBackoffMs(): Long {
+        return when (consecutiveFailures) {
+            0, 1 -> FAILURE_BACKOFF_1_MS
+            2 -> FAILURE_BACKOFF_2_MS
+            else -> FAILURE_BACKOFF_3_MS
+        }
+    }
+
+    private fun readBaseUrl(): String {
+        val flutterPrefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+        val packagePrefs = getSharedPreferences(packageName + "_preferences", Context.MODE_PRIVATE)
+        return flutterPrefs.getString("flutter.$KEY_BASE_URL", null)
+            ?: flutterPrefs.getString(KEY_BASE_URL, null)
+            ?: packagePrefs.getString(KEY_BASE_URL, null)
+            ?: DEFAULT_BASE_URL
+    }
+
+    private fun hostPort(url: String): String {
+        return runCatching {
+            val uri = URI(url)
+            if (uri.port > 0) "${uri.host}:${uri.port}" else uri.host.orEmpty()
+        }.getOrDefault(url)
+    }
+
+    companion object {
+        const val ACTION_START = "com.example.codexflow_flutter.monitor.START"
+        const val ACTION_STOP = "com.example.codexflow_flutter.monitor.STOP"
+        const val ACTION_SET_VISIBILITY = "com.example.codexflow_flutter.monitor.SET_VISIBILITY"
+        const val EXTRA_VISIBLE = "visible"
+
+        private const val KEY_BASE_URL = "codexflow.baseURL"
+        private const val DEFAULT_BASE_URL = "http://127.0.0.1:4318"
+        private const val SUCCESS_VISIBLE_MS = 10_000L
+        private const val SUCCESS_BACKGROUND_MS = 30_000L
+        private const val FAILURE_BACKOFF_1_MS = 30_000L
+        private const val FAILURE_BACKOFF_2_MS = 60_000L
+        private const val FAILURE_BACKOFF_3_MS = 120_000L
+    }
+}
