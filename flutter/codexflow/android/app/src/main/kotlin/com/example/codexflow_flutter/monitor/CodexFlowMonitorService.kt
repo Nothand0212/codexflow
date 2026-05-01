@@ -19,8 +19,15 @@ class CodexFlowMonitorService : Service() {
     private val stateMachine = MonitorStateMachine()
     private var workerThread: HandlerThread? = null
     private var workerHandler: Handler? = null
+    @Volatile
     private var visible = false
+
+    @Volatile
     private var running = false
+
+    @Volatile
+    private var runGeneration = 0L
+
     private var polling = false
     private var consecutiveFailures = 0
     private var lastUrl = ""
@@ -51,6 +58,7 @@ class CodexFlowMonitorService : Service() {
 
     override fun onDestroy() {
         running = false
+        runGeneration += 1
         workerHandler?.removeCallbacksAndMessages(null)
         workerThread?.quitSafely()
         workerHandler = null
@@ -78,11 +86,13 @@ class CodexFlowMonitorService : Service() {
         }
         if (running) return
         running = true
-        workerHandler?.post { pollOnce() }
+        runGeneration += 1
+        val generation = runGeneration
+        workerHandler?.post { pollOnce(generation) }
     }
 
-    private fun pollOnce() {
-        if (!running || polling) return
+    private fun pollOnce(generation: Long) {
+        if (!isCurrentGeneration(generation) || polling) return
         polling = true
         val currentUrl = readBaseUrl()
         try {
@@ -96,6 +106,7 @@ class CodexFlowMonitorService : Service() {
                 nowEpochSeconds = System.currentTimeMillis() / 1000L,
                 forceFreshBaseline = forceFreshBaseline,
             )
+            if (!isCurrentGeneration(generation)) return
             snapshotStore.save(decision.snapshot)
             lastUrl = currentUrl
             lastStatus = decision.status
@@ -107,11 +118,12 @@ class CodexFlowMonitorService : Service() {
             if (decision.turnResults.isNotEmpty()) {
                 notify(CodexFlowNotifications.ID_TURN, notifications.turnResult(decision.turnResults))
             }
-            scheduleNext(if (visible) SUCCESS_VISIBLE_MS else SUCCESS_BACKGROUND_MS)
+            scheduleNext(if (visible) SUCCESS_VISIBLE_MS else SUCCESS_BACKGROUND_MS, generation)
         } catch (_: Exception) {
+            if (!isCurrentGeneration(generation)) return
             consecutiveFailures = (consecutiveFailures + 1).coerceAtMost(3)
             notifyPersistent(offlineStatus(currentUrl))
-            scheduleNext(failureBackoffMs())
+            scheduleNext(failureBackoffMs(), generation)
         } finally {
             polling = false
         }
@@ -119,6 +131,7 @@ class CodexFlowMonitorService : Service() {
 
     private fun stopMonitor() {
         running = false
+        runGeneration += 1
         workerHandler?.removeCallbacksAndMessages(null)
         val url = readBaseUrl()
         snapshotStore.markManuallyStopped(url)
@@ -131,9 +144,13 @@ class CodexFlowMonitorService : Service() {
         stopSelf()
     }
 
-    private fun scheduleNext(delayMs: Long) {
-        if (!running) return
-        workerHandler?.postDelayed({ pollOnce() }, delayMs)
+    private fun scheduleNext(delayMs: Long, generation: Long) {
+        if (!isCurrentGeneration(generation)) return
+        workerHandler?.postDelayed({ pollOnce(generation) }, delayMs)
+    }
+
+    private fun isCurrentGeneration(generation: Long): Boolean {
+        return running && generation == runGeneration
     }
 
     private fun notifyPersistent(status: MonitorStatus) {
