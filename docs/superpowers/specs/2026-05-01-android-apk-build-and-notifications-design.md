@@ -6,6 +6,8 @@ Drafted on 2026-05-01 after user review of the design direction.
 
 Revised after review to address Android 15 foreground service limits, service restart behavior, polling backoff, notification identity, test coverage, runtime APK verification, and APK versioning.
 
+Second revision clarifies approval-to-session mapping, snapshot persistence format, timeout behavior, monitor stop semantics, low-version Android compatibility, repeated notification alerts, URL snapshot cleanup, and release shrinking constraints.
+
 ## Context
 
 CodexFlow lets a mobile client control and monitor a local Codex CLI runtime through the Go Agent. The user is currently using CodexFlow through Tailscale from Android and Web.
@@ -65,6 +67,14 @@ The first APK should target Android 15:
 ```text
 targetSdkVersion = 35
 ```
+
+Minimum supported Android version should stay aligned with Flutter's project default unless implementation discovers a plugin requires a higher floor. The expected first-version floor is:
+
+```text
+minSdkVersion = 21
+```
+
+On Android versions below API 34, `foregroundServiceType="specialUse"` and `FOREGROUND_SERVICE_SPECIAL_USE` are ignored by the platform. The service should still run as a normal foreground service there; the implementation should not add low-version special-case logic beyond standard runtime API guards.
 
 If the installed Flutter stable defaults to a different target SDK, the Android Gradle configuration should override the target explicitly for this release and install the matching Android SDK platform if needed.
 
@@ -227,6 +237,29 @@ If the Agent URL changes, the service must:
 - create a fresh baseline for the new URL
 - avoid emitting alerts from the first successful poll against the new URL
 
+### Dashboard Data Relationships
+
+`DashboardResponse.sessions` and `DashboardResponse.approvals` are separate top-level arrays.
+
+Approvals are not nested under sessions. The app must associate approvals with sessions by this rule:
+
+```text
+PendingRequestView.threadId == SessionSummary.id
+```
+
+When a notification payload needs a `sessionId` for a manual action, it must use:
+
+```text
+sessionId = approval.threadId
+```
+
+Managed-session notification filtering must therefore use a two-step process:
+
+1. Build the managed session id set from `dashboard.sessions` where `session.lifecycleStage == "managed"`.
+2. Filter `dashboard.approvals` to approvals whose `approval.threadId` is in that managed session id set.
+
+Pending manual action count means the count of this filtered approval list, not the raw global approvals length.
+
 ### Foreground Service Type and Permissions
 
 The Android manifest must declare a foreground service using `specialUse`.
@@ -263,17 +296,19 @@ The service polls `/api/v1/dashboard` using the adaptive interval defined in the
 
 On every poll:
 
-1. Fetch the dashboard.
-2. Filter sessions to `lifecycleStage == "managed"`.
-3. Build current state:
-   - managed running count
-   - pending manual action count for managed sessions
-   - approval ids
+1. Read the current Agent URL.
+2. Fetch the dashboard with a 15 second HTTP request timeout.
+3. Filter sessions to `lifecycleStage == "managed"` and build a managed session id set.
+4. Filter the global `dashboard.approvals` list by `approval.threadId in managedSessionIds`.
+5. Build current state:
+   - managed running count from managed sessions
+   - pending manual action count from the filtered approvals
+   - approval ids from the filtered approvals
    - last turn id/status by managed session
-4. Update the persistent status notification.
-5. Compare current state with the previous snapshot.
-6. Emit alert notifications only for new eligible transitions.
-7. Store the current snapshot as the next baseline.
+6. Update the persistent status notification.
+7. Compare current state with the previous snapshot.
+8. Emit alert notifications only for new eligible transitions.
+9. Store the current snapshot as the next baseline.
 
 If the Agent cannot be reached:
 
@@ -281,19 +316,52 @@ If the Agent cannot be reached:
 - alert notifications are not emitted for connection failures in the first version
 - polling continues with exponential backoff so the service can recover when Tailscale or network connectivity returns
 - the persisted snapshot is not discarded
+- timeout is treated as a failed poll and enters the same backoff path
 
 ### Baseline and Deduplication
 
 The service must persist its monitoring snapshot locally, not only in memory.
 
-The persisted snapshot should be keyed by Agent URL and contain:
+Use `SharedPreferences` for the first version. Store one JSON string under a stable key such as:
+
+```text
+codexflow.monitor.snapshot.v1
+```
+
+This is acceptable because the data is small: a handful of URL snapshots containing approval ids, turn keys, timestamps, and counters. Do not write the snapshot on a tight timer; write only after a poll changes snapshot state.
+
+The JSON object should be keyed by Agent URL. Each URL entry contains:
 
 - initialized/baselined state
-- seen approval ids
-- last observed managed turn status by `session.id + lastTurnId`
+- last used timestamp
+- seen approval ids with first-observed timestamps
+- last observed managed turn status by `session.id + lastTurnId`, with first-observed timestamps for terminal result keys
 - last successful dashboard timestamp
 - last known running managed session count
 - last known pending manual action count
+
+Shape:
+
+```json
+{
+  "version": 1,
+  "urls": {
+    "http://100.91.5.116:4318": {
+      "initialized": true,
+      "lastUsedAt": 1777615200,
+      "lastSuccessAt": 1777615200,
+      "seenApprovals": {
+        "req-000123": 1777615200
+      },
+      "seenTurnResults": {
+        "019-session:019-turn:completed": 1777615200
+      },
+      "lastRunningManagedCount": 1,
+      "lastPendingManualActionCount": 0
+    }
+  }
+}
+```
 
 On service start:
 
@@ -317,7 +385,11 @@ Only these statuses produce turn result alerts:
 
 If a turn status is missing or empty, no alert should be emitted.
 
-Persisted snapshot data should be pruned so it cannot grow forever. Approval ids and turn result keys older than 7 days can be dropped.
+Persisted snapshot data should be pruned so it cannot grow forever:
+
+- approval ids older than 7 days can be dropped
+- turn result keys older than 7 days can be dropped
+- entire Agent URL snapshot entries whose `lastUsedAt` is older than 30 days can be dropped
 
 ### History Session List Fix
 
@@ -403,6 +475,8 @@ If exactly one new manual action is detected, notification id `2000` targets tha
 
 If exactly one new turn result is detected, notification id `3000` targets that session detail. If multiple turn results are detected in the same poll, notification id `3000` summarizes the count and opens the dashboard.
 
+Updating notification id `2000` or `3000` for newly detected events must alert again with sound/vibration. The implementation should explicitly disable "only alert once" behavior for alert notifications. For Android APIs or notification libraries that expose this directly, use `setOnlyAlertOnce(false)` or the equivalent.
+
 Repeated polls for the same approval id or same `session.id + lastTurnId + lastTurnStatus` must update state without re-alerting.
 
 ### Android Notification Permission
@@ -431,6 +505,18 @@ The implementation plan should choose the lower-risk option after checking curre
 
 If plugin compatibility is poor, prefer a small Kotlin implementation over fighting plugin behavior.
 
+### Release Shrinking
+
+Release APK builds must verify whether code shrinking and obfuscation are enabled by the selected Flutter/Android configuration.
+
+If Kotlin native service code or method channels are used, add keep rules as needed for:
+
+- `CodexFlowMonitorService`
+- any notification receiver or tap callback Activity/receiver
+- method-channel entrypoints invoked from Flutter or Android
+
+The manifest `android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE` property must remain in the merged manifest. The build verification should inspect the merged or packaged manifest, not rely on source files alone.
+
 ## User Experience
 
 ### Settings
@@ -445,7 +531,16 @@ The settings screen should expose notification/monitoring status:
 
 The first version starts monitoring automatically after the app launches, and the user can stop it from settings.
 
-It does not auto-start after device reboot in this version.
+Stopping monitoring means:
+
+- stop dashboard polling
+- stop the Android foreground service
+- remove the persistent status notification
+- keep the persisted snapshot so monitoring can resume without losing deduplication state
+
+When monitoring is stopped, Android may reclaim the app process more aggressively. This is acceptable for this version. The next app launch should be treated as a normal cold start.
+
+This version does not auto-start monitoring after device reboot.
 
 Changing the Agent URL in settings must reconfigure the monitoring service without requiring the user to force-stop the app.
 
@@ -481,19 +576,24 @@ Session label should prefer the same display logic as the dashboard: explicit na
 Add tests for:
 
 - `discovered` sessions are included in the history group.
+- global `DashboardResponse.approvals` are associated to sessions through `PendingRequestView.threadId == SessionSummary.id`.
 - manual action alerts are not emitted for the initial baseline.
 - persisted snapshots are loaded on service restart and new events since the previous snapshot are not swallowed.
+- persisted snapshot JSON records timestamps for approval ids and turn result keys, then prunes entries older than 7 days.
+- persisted snapshot JSON prunes URL entries whose `lastUsedAt` is older than 30 days.
 - manual action alerts are emitted for new pending approvals in managed sessions.
 - manual action alerts are not emitted for approvals belonging to non-managed sessions.
 - turn result alerts are emitted for new completed/interrupted managed turns.
 - duplicate polling responses do not re-emit the same alert.
 - persistent notification summary counts online/offline, running managed sessions, and pending manual actions.
 - Agent URL changes reset the baseline for the new URL and stop polling the old URL.
-- network failures use 30/60/120 second backoff and success resets the interval.
+- network failures and 15 second HTTP timeouts use 30/60/120 second backoff, and success resets the interval.
 - foreground/background app visibility changes switch between 10 second and 30 second success intervals.
+- stopping monitoring stops polling, stops the foreground service, and removes the persistent notification.
 - notification permission denied state is surfaced without crashing monitoring.
 - notification tap routing handles cold start, dashboard load failure, missing approval, and missing session.
 - notification id and batching logic emits at most one manual action alert and one turn result alert per poll.
+- new events that update alert notification ids `2000` or `3000` re-alert rather than silently updating.
 
 ### Go Tests
 
@@ -516,6 +616,8 @@ Then verify:
 - release APK exists
 - APK manifest contains network, notification, and foreground service permissions
 - APK manifest declares foreground service type `specialUse` and does not declare the monitoring service as `dataSync`
+- APK packaged or merged manifest contains `android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE`
+- release shrinking does not remove foreground service, notification receiver, or method-channel entrypoints
 - APK installs on the Android device
 - Android app can connect to `http://100.91.5.116:4318`
 - dashboard shows discovered historical sessions in the history list, not just the total count
@@ -524,6 +626,18 @@ Then verify:
 - managed turn completion/interruption emits a sound notification
 - notification taps route to the expected screen
 - settings shows app version and build number
+
+### Android Service Verification
+
+Verify on device or emulator:
+
+- start monitoring from settings and confirm the foreground service notification appears
+- stop monitoring from settings and confirm polling stops, the foreground service stops, and the persistent notification disappears
+- restart the app after stopping monitoring and confirm it cold-starts cleanly
+- kill the app process while monitoring is running, relaunch, and confirm persisted snapshot state is loaded
+- change Agent URL while monitoring is running and confirm subsequent polls use the new URL
+- deny notification permission and confirm settings shows alert notifications disabled without crashing
+- simulate Agent timeout or unreachable URL and confirm 30/60/120 second backoff behavior
 
 ## Rollout
 
