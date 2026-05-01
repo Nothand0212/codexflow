@@ -119,14 +119,16 @@ func (a *Agent) Dashboard() Dashboard {
 	approvals := a.PendingRequests()
 
 	stats := DashboardStats{
-		TotalSessions:    len(summaries),
 		PendingApprovals: len(approvals),
 	}
 	for _, session := range summaries {
+		if session.UserInitiated {
+			stats.TotalSessions++
+		}
 		if session.Loaded {
 			stats.LoadedSessions++
 		}
-		if session.Status == "active" && !session.Ended {
+		if session.UserInitiated && session.Status == "active" && !session.Ended {
 			stats.ActiveSessions++
 		}
 	}
@@ -162,8 +164,12 @@ func (a *Agent) ListSessions() []SessionSummary {
 }
 
 func (a *Agent) SessionDetail(ctx context.Context, threadID string) (SessionDetail, error) {
+	return a.SessionDetailPage(ctx, threadID, SessionDetailPageRequest{TurnLimit: 0})
+}
+
+func (a *Agent) SessionDetailPage(ctx context.Context, threadID string, pageRequest SessionDetailPageRequest) (SessionDetail, error) {
 	if isClaudeThreadID(threadID) {
-		return a.claudeSessionDetail(threadID)
+		return a.claudeSessionDetail(threadID, pageRequest)
 	}
 
 	var response codex.ThreadReadResponse
@@ -176,7 +182,7 @@ func (a *Agent) SessionDetail(ctx context.Context, threadID string) (SessionDeta
 			if !ok {
 				return SessionDetail{}, err
 			}
-			return toSessionDetail(record, pendingCountForThread(a.store.SnapshotPending(), threadID)), nil
+			return toSessionDetailPage(record, pendingCountForThread(a.store.SnapshotPending(), threadID), pageRequest), nil
 		}
 		return SessionDetail{}, err
 	}
@@ -189,7 +195,7 @@ func (a *Agent) SessionDetail(ctx context.Context, threadID string) (SessionDeta
 
 	pendingCount := pendingCountForThread(a.store.SnapshotPending(), threadID)
 
-	return toSessionDetail(record, pendingCount), nil
+	return toSessionDetailPage(record, pendingCount, pageRequest), nil
 }
 
 func (a *Agent) PendingRequests() []PendingRequestView {
@@ -806,6 +812,17 @@ func (a *Agent) handleServerRequest(ctx context.Context, request codex.ServerReq
 		return
 	}
 
+	if a.cfg.CodexAutoApprove {
+		if result, ok := codexAutoApprovalResult(request.Method, params); ok {
+			if err := a.client.Reply(ctx, request.ID, result); err != nil {
+				a.logger.Warn("failed to auto-approve codex request, falling back to manual approval", "method", request.Method, "error", err)
+			} else {
+				a.logger.Info("auto-approved codex request", "method", request.Method, "threadId", stringFieldAny(params, "threadId"), "turnId", stringFieldAny(params, "turnId"))
+				return
+			}
+		}
+	}
+
 	choices := deriveChoices(request.Method, params)
 	pending := a.store.UpsertPending(request.Method, request.ID, params, choices)
 	a.broker.Publish("approval.created", PendingRequestView{
@@ -821,6 +838,61 @@ func (a *Agent) handleServerRequest(ctx context.Context, request codex.ServerReq
 		CreatedAt: pending.CreatedAt,
 		Params:    pending.Params,
 	})
+}
+
+func codexAutoApprovalResult(method string, params map[string]any) (any, bool) {
+	switch method {
+	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
+		return map[string]any{
+			"decision": codexAutoApprovalDecision(params),
+		}, true
+	case "item/permissions/requestApproval":
+		permissions := params["permissions"]
+		if permissions == nil {
+			permissions = map[string]any{
+				"network":    nil,
+				"fileSystem": nil,
+			}
+		}
+		return map[string]any{
+			"permissions": permissions,
+			"scope":       "session",
+		}, true
+	default:
+		return nil, false
+	}
+}
+
+func codexAutoApprovalDecision(params map[string]any) any {
+	raw, _ := params["availableDecisions"].([]any)
+
+	var accept any
+	var amendment any
+	for _, item := range raw {
+		switch value := item.(type) {
+		case string:
+			switch value {
+			case "acceptForSession":
+				return value
+			case "accept":
+				accept = value
+			}
+		case map[string]any:
+			if payload, ok := value["acceptWithExecpolicyAmendment"]; ok {
+				amendment = map[string]any{
+					"acceptWithExecpolicyAmendment": payload,
+				}
+			}
+		}
+	}
+
+	if amendment != nil {
+		return amendment
+	}
+	if accept != nil {
+		return accept
+	}
+	return "acceptForSession"
 }
 
 func deriveChoices(method string, params map[string]any) []string {

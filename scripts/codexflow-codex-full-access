@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec /home/lin/.nvm/versions/node/v24.13.0/bin/codex \
+  --dangerously-bypass-approvals-and-sandbox \
+  "$@"

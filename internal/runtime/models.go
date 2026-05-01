@@ -34,6 +34,12 @@ type AgentCapabilities struct {
 	SupportsHistoryImport bool `json:"supportsHistoryImport"`
 }
 
+type AgentSkill struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	InsertText  string `json:"insertText"`
+}
+
 type DashboardStats struct {
 	TotalSessions    int `json:"totalSessions"`
 	LoadedSessions   int `json:"loadedSessions"`
@@ -67,11 +73,25 @@ type SessionSummary struct {
 	ResumeAvailable     bool     `json:"resumeAvailable"`
 	ResumeBlockedReason string   `json:"resumeBlockedReason"`
 	Ended               bool     `json:"ended"`
+	UserInitiated       bool     `json:"userInitiated"`
 }
 
 type SessionDetail struct {
-	Summary SessionSummary `json:"summary"`
-	Turns   []TurnDetail   `json:"turns"`
+	Summary SessionSummary    `json:"summary"`
+	Turns   []TurnDetail      `json:"turns"`
+	Page    SessionDetailPage `json:"page"`
+}
+
+type SessionDetailPage struct {
+	TurnOffset    int  `json:"turnOffset"`
+	TurnLimit     int  `json:"turnLimit"`
+	TotalTurns    int  `json:"totalTurns"`
+	HasMoreBefore bool `json:"hasMoreBefore"`
+}
+
+type SessionDetailPageRequest struct {
+	TurnOffset int
+	TurnLimit  int
 }
 
 type TurnDetail struct {

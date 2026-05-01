@@ -9,6 +9,11 @@ import (
 	"codexflow/internal/store"
 )
 
+const (
+	DefaultSessionDetailTurnLimit = 40
+	MaxSessionDetailTurnLimit     = 200
+)
+
 func toSessionSummary(record store.SessionRecord, pendingApprovals int) SessionSummary {
 	var lastTurnID string
 	var lastTurnStatus string
@@ -18,7 +23,7 @@ func toSessionSummary(record store.SessionRecord, pendingApprovals int) SessionS
 		lastTurnStatus = lastTurn.Status
 	}
 
-	effectiveLoaded := record.Loaded && !record.Runtime.Ended
+	effectiveLoaded := record.Managed && record.Loaded && !record.Runtime.Ended
 	effectiveStatus := record.Thread.Status.Type
 	if record.Runtime.Ended {
 		effectiveStatus = "idle"
@@ -54,6 +59,7 @@ func toSessionSummary(record store.SessionRecord, pendingApprovals int) SessionS
 		ResumeAvailable:     resumeAvailable,
 		ResumeBlockedReason: resumeBlockedReason,
 		Ended:               record.Runtime.Ended,
+		UserInitiated:       isUserInitiatedSession(record),
 	}
 }
 
@@ -89,7 +95,7 @@ func deriveLifecycleStage(record store.SessionRecord, historyAvailable, runtimeA
 	switch {
 	case record.Runtime.Ended:
 		return "ended"
-	case record.Loaded:
+	case record.Managed:
 		return "managed"
 	case runtimeAvailable:
 		return "runtime_available"
@@ -100,15 +106,97 @@ func deriveLifecycleStage(record store.SessionRecord, historyAvailable, runtimeA
 	}
 }
 
+func isUserInitiatedSession(record store.SessionRecord) bool {
+	if record.Managed {
+		return true
+	}
+	if isClaudeThreadID(record.Thread.ID) {
+		return true
+	}
+
+	switch codex.SourceLabel(record.Thread.Source) {
+	case "subagent", "vscode":
+		return false
+	default:
+		return true
+	}
+}
+
 func toSessionDetail(record store.SessionRecord, pendingApprovals int) SessionDetail {
-	turns := make([]TurnDetail, 0, len(record.Thread.Turns))
-	for _, turn := range record.Thread.Turns {
+	return toSessionDetailWindow(
+		record,
+		pendingApprovals,
+		0,
+		len(record.Thread.Turns),
+		SessionDetailPage{
+			TurnOffset:    0,
+			TurnLimit:     len(record.Thread.Turns),
+			TotalTurns:    len(record.Thread.Turns),
+			HasMoreBefore: false,
+		},
+	)
+}
+
+func toSessionDetailPage(record store.SessionRecord, pendingApprovals int, request SessionDetailPageRequest) SessionDetail {
+	totalTurns := len(record.Thread.Turns)
+	normalized := normalizeSessionDetailPageRequest(request, totalTurns)
+	end := totalTurns - normalized.TurnOffset
+	if end < 0 {
+		end = 0
+	}
+	start := end - normalized.TurnLimit
+	if start < 0 {
+		start = 0
+	}
+	page := SessionDetailPage{
+		TurnOffset:    normalized.TurnOffset,
+		TurnLimit:     normalized.TurnLimit,
+		TotalTurns:    totalTurns,
+		HasMoreBefore: start > 0,
+	}
+	return toSessionDetailWindow(record, pendingApprovals, start, end, page)
+}
+
+func normalizeSessionDetailPageRequest(request SessionDetailPageRequest, totalTurns int) SessionDetailPageRequest {
+	offset := request.TurnOffset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > totalTurns {
+		offset = totalTurns
+	}
+
+	limit := request.TurnLimit
+	if limit <= 0 {
+		limit = DefaultSessionDetailTurnLimit
+	}
+	if limit > MaxSessionDetailTurnLimit {
+		limit = MaxSessionDetailTurnLimit
+	}
+	return SessionDetailPageRequest{TurnOffset: offset, TurnLimit: limit}
+}
+
+func toSessionDetailWindow(record store.SessionRecord, pendingApprovals int, start, end int, page SessionDetailPage) SessionDetail {
+	if start < 0 {
+		start = 0
+	}
+	if end < start {
+		end = start
+	}
+	if end > len(record.Thread.Turns) {
+		end = len(record.Thread.Turns)
+	}
+
+	turnWindow := record.Thread.Turns[start:end]
+	turns := make([]TurnDetail, 0, len(turnWindow))
+	for _, turn := range turnWindow {
 		turns = append(turns, toTurnDetail(turn, record.Runtime))
 	}
 
 	return SessionDetail{
 		Summary: toSessionSummary(record, pendingApprovals),
 		Turns:   turns,
+		Page:    page,
 	}
 }
 

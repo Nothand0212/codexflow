@@ -16,11 +16,9 @@ class ApiError implements Exception {
 }
 
 class ApiClient {
-  ApiClient({
-    required String baseUrlString,
-    http.Client? client,
-  })  : _baseUri = Uri.parse(baseUrlString),
-        _client = client ?? http.Client();
+  ApiClient({required String baseUrlString, http.Client? client})
+    : _baseUri = Uri.parse(baseUrlString),
+      _client = client ?? http.Client();
 
   final Uri _baseUri;
   final http.Client _client;
@@ -30,8 +28,36 @@ class ApiClient {
     return DashboardResponse.fromJson(json);
   }
 
-  Future<SessionDetail> sessionDetail(String id) async {
-    final json = await _decodeMap('/api/v1/sessions/$id');
+  Future<List<AgentSkill>> skills() async {
+    final json = await _decodeMap('/api/v1/skills');
+    final skills = asList(
+      json['data'],
+    ).map((item) => AgentSkill.fromJson(asMap(item))).toList();
+    skills.sort((left, right) {
+      final leftName = left.name.toLowerCase();
+      final rightName = right.name.toLowerCase();
+      if (leftName == rightName) {
+        return left.name.compareTo(right.name);
+      }
+      return leftName.compareTo(rightName);
+    });
+    return skills;
+  }
+
+  Future<SessionDetail> sessionDetail(
+    String id, {
+    int? turnOffset,
+    int? turnLimit,
+  }) async {
+    final query = <String>[];
+    if (turnOffset != null) {
+      query.add('turnOffset=$turnOffset');
+    }
+    if (turnLimit != null) {
+      query.add('turnLimit=$turnLimit');
+    }
+    final suffix = query.isEmpty ? '' : '?${query.join('&')}';
+    final json = await _decodeMap('/api/v1/sessions/$id$suffix');
     return SessionDetail.fromJson(json);
   }
 
@@ -149,16 +175,14 @@ class ApiClient {
     final uri = _baseUri.resolve('/api/v1/uploads/image');
     final request = http.MultipartRequest('POST', uri)
       ..files.add(
-        http.MultipartFile.fromBytes(
-          'file',
-          bytes,
-          filename: fileName,
-        ),
+        http.MultipartFile.fromBytes('file', bytes, filename: fileName),
       );
 
     late http.StreamedResponse streamed;
     try {
-      streamed = await _client.send(request).timeout(const Duration(seconds: 45));
+      streamed = await _client
+          .send(request)
+          .timeout(const Duration(seconds: 45));
     } on TimeoutException {
       throw ApiError('The image upload request timed out.');
     } catch (error) {
@@ -186,8 +210,9 @@ class ApiClient {
       return UploadedImageRef.fromJson(payload);
     }
     if (payload is Map) {
-      final map = payload
-          .map((key, dynamic value) => MapEntry(key.toString(), value));
+      final map = payload.map(
+        (key, dynamic value) => MapEntry(key.toString(), value),
+      );
       return UploadedImageRef.fromJson(map);
     }
     throw ApiError('The agent returned an invalid upload response.');
@@ -209,8 +234,9 @@ class ApiClient {
       return result;
     }
     if (result is Map) {
-      return result
-          .map((key, dynamic value) => MapEntry(key.toString(), value));
+      return result.map(
+        (key, dynamic value) => MapEntry(key.toString(), value),
+      );
     }
     throw ApiError('The agent returned an invalid response.');
   }
@@ -267,20 +293,14 @@ class ApiClient {
     final inputs = <Map<String, dynamic>>[];
     final trimmed = prompt.trim();
     if (trimmed.isNotEmpty) {
-      inputs.add(<String, dynamic>{
-        'type': 'text',
-        'text': trimmed,
-      });
+      inputs.add(<String, dynamic>{'type': 'text', 'text': trimmed});
     }
     for (final id in imageUploadIds) {
       final trimmedId = id.trim();
       if (trimmedId.isEmpty) {
         continue;
       }
-      inputs.add(<String, dynamic>{
-        'type': 'image',
-        'uploadId': trimmedId,
-      });
+      inputs.add(<String, dynamic>{'type': 'image', 'uploadId': trimmedId});
     }
     return inputs;
   }

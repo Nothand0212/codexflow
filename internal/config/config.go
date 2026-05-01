@@ -3,24 +3,27 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 type Config struct {
-	ListenAddr      string
-	CodexPath       string
-	ClaudePath      string
-	RefreshInterval time.Duration
-	StateDBPath     string
+	ListenAddr       string
+	CodexPath        string
+	ClaudePath       string
+	CodexAutoApprove bool
+	RefreshInterval  time.Duration
+	StateDBPath      string
 }
 
 func Load() Config {
 	return Config{
-		ListenAddr:      getenv("CODEXFLOW_LISTEN_ADDR", "127.0.0.1:4318"),
-		CodexPath:       getenv("CODEXFLOW_CODEX_PATH", "codex"),
-		ClaudePath:      getenv("CODEXFLOW_CLAUDE_PATH", "claude"),
-		RefreshInterval: getDurationEnv("CODEXFLOW_REFRESH_INTERVAL", 12*time.Second),
-		StateDBPath:     getenv("CODEXFLOW_STATE_DB_PATH", defaultStateDBPath()),
+		ListenAddr:       getenv("CODEXFLOW_LISTEN_ADDR", "127.0.0.1:4318"),
+		CodexPath:        getenv("CODEXFLOW_CODEX_PATH", "codex"),
+		ClaudePath:       getenv("CODEXFLOW_CLAUDE_PATH", "claude"),
+		CodexAutoApprove: getBoolEnv("CODEXFLOW_CODEX_AUTO_APPROVE", false),
+		RefreshInterval:  getDurationEnv("CODEXFLOW_REFRESH_INTERVAL", 12*time.Second),
+		StateDBPath:      getenv("CODEXFLOW_STATE_DB_PATH", defaultStateDBPath()),
 	}
 }
 
@@ -42,6 +45,21 @@ func getDurationEnv(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
+}
+
+func getBoolEnv(key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	case "0", "false", "f", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func defaultStateDBPath() string {

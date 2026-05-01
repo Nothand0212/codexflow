@@ -482,7 +482,7 @@ func (a *Agent) ensureClaudeThread(threadID string) error {
 	return fmt.Errorf("claude session %s not found", threadID)
 }
 
-func (a *Agent) claudeSessionDetail(threadID string) (SessionDetail, error) {
+func (a *Agent) claudeSessionDetail(threadID string, pageRequest SessionDetailPageRequest) (SessionDetail, error) {
 	if err := a.ensureClaudeThread(threadID); err != nil {
 		return SessionDetail{}, err
 	}
@@ -517,7 +517,7 @@ func (a *Agent) claudeSessionDetail(threadID string) (SessionDetail, error) {
 	}
 
 	pendingCount := pendingCountForThread(a.store.SnapshotPending(), threadID)
-	return toSessionDetail(record, pendingCount), nil
+	return toSessionDetailPage(record, pendingCount, pageRequest), nil
 }
 
 func (a *Agent) readClaudeTurns(thread codex.Thread) ([]codex.Turn, int64, error) {
@@ -2334,7 +2334,9 @@ func (a *Agent) startClaudeTurn(ctx context.Context, threadID string, input []ma
 		},
 	})
 
-	detail, err := a.claudeSessionDetail(threadID)
+	detail, err := a.claudeSessionDetail(threadID, SessionDetailPageRequest{
+		TurnLimit: MaxSessionDetailTurnLimit,
+	})
 	if err != nil {
 		return TurnDetail{}, err
 	}

@@ -24,11 +24,6 @@ class DashboardScreen extends StatelessWidget {
     final filteredSessions = sessionGroups.sessions;
     final loadedCount = sessionGroups.loadedCount;
     final activeCount = sessionGroups.activeCount;
-    final pendingApprovalCount = sessionGroups.pendingApprovalCount;
-    final managedSessions = sessionGroups.managed;
-    final endedSessions = sessionGroups.ended;
-    final runtimeSessions = sessionGroups.runtimeAvailable;
-    final historySessions = sessionGroups.history;
 
     return Scaffold(
       backgroundColor: Palette.canvas,
@@ -38,6 +33,20 @@ class DashboardScreen extends StatelessWidget {
           style: roundedTextStyle(size: 17, weight: FontWeight.w600),
         ),
         centerTitle: true,
+        actions: <Widget>[
+          IconButton(
+            tooltip: '新建会话',
+            icon: const Icon(Icons.add_rounded),
+            onPressed: () {
+              showModalBottomSheet<void>(
+                context: context,
+                isScrollControlled: true,
+                backgroundColor: Colors.transparent,
+                builder: (BuildContext context) => const NewSessionSheet(),
+              );
+            },
+          ),
+        ],
       ),
       body: PageScaffold(
         child: RefreshIndicator(
@@ -54,36 +63,6 @@ class DashboardScreen extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 12),
-              GridView.count(
-                crossAxisCount: 2,
-                shrinkWrap: true,
-                childAspectRatio: 1.55,
-                crossAxisSpacing: 10,
-                mainAxisSpacing: 10,
-                physics: const NeverScrollableScrollPhysics(),
-                children: <Widget>[
-                  MetricCard(
-                    title: '总会话',
-                    value: '${filteredSessions.length}',
-                    tone: Palette.softBlue,
-                  ),
-                  MetricCard(
-                    title: '已加载',
-                    value: '$loadedCount',
-                    tone: Palette.accent,
-                  ),
-                  MetricCard(
-                    title: '运行中',
-                    value: '$activeCount',
-                    tone: Palette.accent2,
-                  ),
-                  MetricCard(
-                    title: '待审批',
-                    value: '$pendingApprovalCount',
-                    tone: Palette.warning,
-                  ),
-                ],
-              ),
               if (model.operationNotice.isNotEmpty) ...<Widget>[
                 const SizedBox(height: 12),
                 Container(
@@ -135,126 +114,331 @@ class DashboardScreen extends StatelessWidget {
                   ),
                 ),
               ],
-              if (pendingApprovalCount > 0) ...<Widget>[
-                const SizedBox(height: 12),
-                const PanelCard(
-                  compact: true,
-                  child: Row(
-                    children: <Widget>[
-                      Icon(
-                        Icons.warning_rounded,
-                        color: Palette.warning,
-                        size: 18,
-                      ),
-                      SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          '当前有审批等待处理。',
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                            color: Palette.warning,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
               const SizedBox(height: 12),
-              Row(
-                children: <Widget>[
-                  Row(
-                    children: <Widget>[
-                      Text(
-                        '列表',
-                        style: roundedTextStyle(
-                          size: 16,
-                          weight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        '${filteredSessions.length}',
-                        style: roundedTextStyle(
-                          size: 12,
-                          weight: FontWeight.w600,
-                          color: Palette.mutedInk,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const Spacer(),
-                  SizedBox(
-                    width: 84,
-                    child: ActionButton(
-                      title: '新建',
-                      background: Palette.softBlue,
-                      foreground: Colors.white,
-                      icon: Icons.add,
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      onPressed: () {
-                        showModalBottomSheet<void>(
-                          context: context,
-                          isScrollControlled: true,
-                          backgroundColor: Colors.transparent,
-                          builder: (BuildContext context) =>
-                              const NewSessionSheet(),
-                        );
-                      },
-                    ),
-                  ),
-                ],
+              _HomeMetricButton(
+                title: '总会话',
+                value: '${filteredSessions.length}',
+                icon: Icons.forum_rounded,
+                tone: Palette.softBlue,
+                onTap: () => _openSessionBrowser(
+                  context,
+                  _SessionBrowserFilter.all,
+                  selectedAgentId,
+                ),
               ),
               const SizedBox(height: 10),
-              if (filteredSessions.isEmpty)
-                const PanelCard(
-                  compact: true,
-                  child: Text(
-                    '暂时没有会话。先确认 Agent 已连接，或者点上方“新建”。',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: Palette.mutedInk,
-                    ),
-                  ),
-                )
-              else ...<Widget>[
-                if (managedSessions.isNotEmpty)
-                  _SessionGroup(
-                    title: '已接管',
-                    helper: '这些会话已经由 CodexFlow 后台托管，可以直接继续 steer、开始下一轮，或处理中断。',
-                    sessions: managedSessions,
-                  ),
-                if (endedSessions.isNotEmpty)
-                  _SessionGroup(
-                    title: '已结束',
-                    helper:
-                        '这些会话的历史和 turns 仍然保留，但已经从 CodexFlow 托管态退出。需要继续时，再重新接管。',
-                    sessions: endedSessions,
-                  ),
-                if (runtimeSessions.isNotEmpty)
-                  _SessionGroup(
-                    title: selectedAgentId == 'claude' ? '可接管 Runtime' : '待接管',
-                    helper: selectedAgentId == 'claude'
-                        ? '这些 Claude 会话当前在本机 runtime 中可见。接管后，CodexFlow 才能继续刷新状态、处理中断和后续操作。'
-                        : '这些会话当前未接管，但运行时仍可继续接管。',
-                    sessions: runtimeSessions,
-                  ),
-                if (historySessions.isNotEmpty)
-                  _SessionGroup(
-                    title: selectedAgentId == 'claude' ? '历史导入' : '历史会话',
-                    helper: selectedAgentId == 'claude'
-                        ? '这些 Claude 会话目前只发现了历史 transcript。可以查看历史，但不代表当前存在可接管 runtime。'
-                        : '这些只是已发现的真实会话记录。先接管，才可以继续执行、处理中断和后续审批。',
-                    sessions: historySessions,
-                  ),
-              ],
+              _HomeMetricButton(
+                title: '已加载',
+                value: '$loadedCount',
+                icon: Icons.cloud_done_rounded,
+                tone: Palette.accent,
+                onTap: () => _openSessionBrowser(
+                  context,
+                  _SessionBrowserFilter.loaded,
+                  selectedAgentId,
+                ),
+              ),
+              const SizedBox(height: 10),
+              _HomeMetricButton(
+                title: '运行中',
+                value: '$activeCount',
+                icon: Icons.play_circle_fill_rounded,
+                tone: Palette.accent2,
+                onTap: () => _openSessionBrowser(
+                  context,
+                  _SessionBrowserFilter.active,
+                  selectedAgentId,
+                ),
+              ),
+              const SizedBox(height: 10),
             ],
           ),
         ),
       ),
     );
+  }
+
+  void _openSessionBrowser(
+    BuildContext context,
+    _SessionBrowserFilter filter,
+    String agentId,
+  ) {
+    Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => _SessionBrowserScreen(filter: filter, agentId: agentId),
+      ),
+    );
+  }
+}
+
+enum _SessionBrowserFilter { all, loaded, active }
+
+class _HomeMetricButton extends StatelessWidget {
+  const _HomeMetricButton({
+    required this.title,
+    required this.value,
+    required this.icon,
+    required this.tone,
+    required this.onTap,
+  });
+
+  final String title;
+  final String value;
+  final IconData icon;
+  final Color tone;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Palette.panelStrong,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Palette.line),
+          ),
+          child: Row(
+            children: <Widget>[
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: tone.appOpacity(0.12),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(icon, color: tone, size: 24),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Text(
+                  title,
+                  style: roundedTextStyle(size: 16, weight: FontWeight.w600),
+                ),
+              ),
+              Text(
+                value,
+                style: roundedTextStyle(size: 28, weight: FontWeight.w700),
+              ),
+              const SizedBox(width: 8),
+              const Icon(
+                Icons.chevron_right_rounded,
+                size: 22,
+                color: Palette.mutedInk,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SessionBrowserScreen extends StatefulWidget {
+  const _SessionBrowserScreen({required this.filter, required this.agentId});
+
+  final _SessionBrowserFilter filter;
+  final String agentId;
+
+  @override
+  State<_SessionBrowserScreen> createState() => _SessionBrowserScreenState();
+}
+
+class _SessionBrowserScreenState extends State<_SessionBrowserScreen> {
+  late final TextEditingController _searchController;
+
+  @override
+  void initState() {
+    super.initState();
+    _searchController = TextEditingController();
+    _searchController.addListener(() {
+      setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final model = context.watch<AppModel>();
+    final sessionGroups = groupSessionsForAgent(
+      sessions: model.dashboard.sessions,
+      approvals: model.dashboard.approvals,
+      selectedAgentId: widget.agentId,
+    );
+    final sessions = _sortedSessions(_sessionsForFilter(sessionGroups));
+    final query = _searchController.text.trim().toLowerCase();
+    final visibleSessions = query.isEmpty
+        ? sessions
+        : sessions.where((session) => _matchesQuery(session, query)).toList();
+
+    return Scaffold(
+      backgroundColor: Palette.canvas,
+      appBar: AppBar(
+        title: Text(
+          _filterTitle(widget.filter),
+          style: roundedTextStyle(size: 17, weight: FontWeight.w600),
+        ),
+        centerTitle: true,
+      ),
+      body: PageScaffold(
+        child: RefreshIndicator(
+          color: Palette.accent,
+          onRefresh: model.refreshDashboard,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+            children: <Widget>[
+              Container(
+                decoration: BoxDecoration(
+                  color: Palette.panelStrong,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: Palette.line),
+                ),
+                child: TextField(
+                  controller: _searchController,
+                  autocorrect: false,
+                  textCapitalization: TextCapitalization.none,
+                  style: roundedTextStyle(size: 14, weight: FontWeight.w500),
+                  cursorColor: Palette.softBlue,
+                  decoration: InputDecoration(
+                    hintText: '搜索会话、路径、分支或首条消息',
+                    hintStyle: roundedTextStyle(
+                      size: 14,
+                      weight: FontWeight.w500,
+                      color: Palette.mutedInk,
+                    ),
+                    prefixIcon: const Icon(
+                      Icons.search_rounded,
+                      color: Palette.mutedInk,
+                    ),
+                    suffixIcon: query.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: '清空搜索',
+                            icon: const Icon(
+                              Icons.close_rounded,
+                              color: Palette.mutedInk,
+                            ),
+                            onPressed: _searchController.clear,
+                          ),
+                    border: InputBorder.none,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 14,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: <Widget>[
+                  Text(
+                    '${visibleSessions.length}',
+                    style: roundedTextStyle(size: 18, weight: FontWeight.w700),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '/ ${sessions.length}',
+                    style: roundedTextStyle(
+                      size: 13,
+                      weight: FontWeight.w600,
+                      color: Palette.mutedInk,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    '最近更新优先',
+                    style: roundedTextStyle(
+                      size: 12,
+                      weight: FontWeight.w600,
+                      color: Palette.mutedInk,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              if (visibleSessions.isEmpty)
+                PanelCard(
+                  compact: true,
+                  child: Text(
+                    query.isEmpty ? '暂无会话。' : '没有匹配的会话。',
+                    style: roundedTextStyle(
+                      size: 13,
+                      weight: FontWeight.w500,
+                      color: Palette.mutedInk,
+                    ),
+                  ),
+                )
+              else
+                ...visibleSessions.map(
+                  (session) => Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: SessionRow(session: session),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<SessionSummary> _sessionsForFilter(SessionGroups groups) {
+    switch (widget.filter) {
+      case _SessionBrowserFilter.loaded:
+        return groups.sessions.where((session) => session.loaded).toList();
+      case _SessionBrowserFilter.active:
+        return groups.sessions
+            .where((session) => session.status == 'active' && !session.isEnded)
+            .toList();
+      case _SessionBrowserFilter.all:
+        return groups.sessions;
+    }
+  }
+
+  List<SessionSummary> _sortedSessions(List<SessionSummary> sessions) {
+    final sorted = <SessionSummary>[...sessions];
+    sorted.sort((left, right) {
+      if (left.updatedAt == right.updatedAt) {
+        return left.id.compareTo(right.id);
+      }
+      return right.updatedAt.compareTo(left.updatedAt);
+    });
+    return sorted;
+  }
+
+  bool _matchesQuery(SessionSummary session, String query) {
+    final haystack = <String>[
+      session.displayName,
+      session.preview,
+      session.cwd,
+      session.branch,
+      session.source,
+      session.status,
+      session.lifecycleStage,
+      session.modelProvider,
+      session.id,
+    ].join('\n').toLowerCase();
+    return haystack.contains(query);
+  }
+
+  String _filterTitle(_SessionBrowserFilter filter) {
+    switch (filter) {
+      case _SessionBrowserFilter.loaded:
+        return '已加载';
+      case _SessionBrowserFilter.active:
+        return '运行中';
+      case _SessionBrowserFilter.all:
+        return '总会话';
+    }
   }
 }
 
@@ -337,64 +521,6 @@ class _AgentSwitchButton extends StatelessWidget {
   }
 }
 
-class _SessionGroup extends StatelessWidget {
-  const _SessionGroup({
-    required this.title,
-    required this.helper,
-    required this.sessions,
-  });
-
-  final String title;
-  final String helper;
-  final List<SessionSummary> sessions;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Row(
-            children: <Widget>[
-              Text(
-                title,
-                style: roundedTextStyle(size: 14, weight: FontWeight.w600),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                '${sessions.length}',
-                style: roundedTextStyle(
-                  size: 12,
-                  weight: FontWeight.w600,
-                  color: Palette.mutedInk,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            helper,
-            style: roundedTextStyle(
-              size: 13,
-              weight: FontWeight.w500,
-              color: Palette.mutedInk,
-              height: 1.45,
-            ),
-          ),
-          const SizedBox(height: 10),
-          ...sessions.map(
-            (session) => Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: SessionRow(session: session),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class SessionRow extends StatelessWidget {
   const SessionRow({super.key, required this.session});
 
@@ -438,8 +564,6 @@ class SessionRow extends StatelessWidget {
                           const SizedBox(height: 5),
                           Text(
                             session.cwd,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
                             style: roundedTextStyle(
                               size: 12,
                               weight: FontWeight.w500,

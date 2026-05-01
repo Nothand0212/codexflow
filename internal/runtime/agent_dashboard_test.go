@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"testing"
 
 	"codexflow/internal/codex"
@@ -35,6 +36,8 @@ func TestDashboardLoadedSessionsExcludeEndedSessions(t *testing.T) {
 		"active-thread": true,
 	})
 
+	sessionStore.SetSessionManaged("ended-thread", true)
+	sessionStore.SetSessionManaged("active-thread", true)
 	sessionStore.SetSessionEnded("ended-thread", true)
 
 	agent := &Agent{store: sessionStore}
@@ -57,6 +60,130 @@ func TestDashboardLoadedSessionsExcludeEndedSessions(t *testing.T) {
 		if session.ID == "ended-thread" && session.Loaded {
 			t.Fatalf("ended session should not be marked loaded in API summary")
 		}
+	}
+}
+
+func TestDashboardLoadedSessionsCountOnlyManagedSessions(t *testing.T) {
+	sessionStore, err := store.New(nil)
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+
+	sessionStore.ReplaceSessions([]codex.Thread{
+		{
+			ID:            "runtime-loaded-only",
+			ModelProvider: "OpenAI",
+			CreatedAt:     100,
+			UpdatedAt:     200,
+			Status:        codex.ThreadStatus{Type: "notLoaded"},
+			CWD:           "/tmp/runtime",
+		},
+		{
+			ID:            "codexflow-managed",
+			ModelProvider: "OpenAI",
+			CreatedAt:     101,
+			UpdatedAt:     201,
+			Status:        codex.ThreadStatus{Type: "idle"},
+			CWD:           "/tmp/managed",
+		},
+	}, map[string]bool{
+		"runtime-loaded-only": true,
+		"codexflow-managed":   true,
+	})
+	sessionStore.SetSessionManaged("codexflow-managed", true)
+
+	agent := &Agent{store: sessionStore}
+	dashboard := agent.Dashboard()
+
+	if got, want := dashboard.Stats.LoadedSessions, 1; got != want {
+		t.Fatalf("loaded sessions = %d, want %d", got, want)
+	}
+
+	byID := make(map[string]SessionSummary)
+	for _, summary := range dashboard.Sessions {
+		byID[summary.ID] = summary
+	}
+	if byID["runtime-loaded-only"].Loaded {
+		t.Fatalf("runtime-loaded-only should not be user-visible loaded")
+	}
+	if got := byID["runtime-loaded-only"].LifecycleStage; got == "managed" {
+		t.Fatalf("runtime-loaded-only lifecycle = %q, want non-managed", got)
+	}
+	if !byID["codexflow-managed"].Loaded {
+		t.Fatalf("codexflow-managed should be user-visible loaded")
+	}
+}
+
+func TestDashboardTotalSessionsCountOnlyUserInitiatedSessions(t *testing.T) {
+	sessionStore, err := store.New(nil)
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+
+	sessionStore.ReplaceSessions([]codex.Thread{
+		{
+			ID:            "cli-root",
+			ModelProvider: "OpenAI",
+			CreatedAt:     100,
+			UpdatedAt:     200,
+			Status:        codex.ThreadStatus{Type: "idle"},
+			CWD:           "/tmp/cli",
+			Source:        json.RawMessage(`"cli"`),
+		},
+		{
+			ID:            "managed-codexflow",
+			ModelProvider: "OpenAI",
+			CreatedAt:     101,
+			UpdatedAt:     201,
+			Status:        codex.ThreadStatus{Type: "idle"},
+			CWD:           "/tmp/managed",
+			Source:        json.RawMessage(`"vscode"`),
+		},
+		{
+			ID:            "external-import",
+			ModelProvider: "OpenAI",
+			CreatedAt:     102,
+			UpdatedAt:     202,
+			Status:        codex.ThreadStatus{Type: "idle"},
+			CWD:           "/tmp/external",
+			Source:        json.RawMessage(`"vscode"`),
+		},
+		{
+			ID:            "agent-spawned",
+			ModelProvider: "OpenAI",
+			CreatedAt:     103,
+			UpdatedAt:     203,
+			Status:        codex.ThreadStatus{Type: "idle"},
+			CWD:           "/tmp/subagent",
+			Source:        json.RawMessage(`{"subagent":{"thread_spawn":{"parent_thread_id":"cli-root","depth":1}}}`),
+		},
+	}, map[string]bool{
+		"managed-codexflow": true,
+	})
+	sessionStore.SetSessionManaged("managed-codexflow", true)
+
+	agent := &Agent{store: sessionStore}
+	dashboard := agent.Dashboard()
+
+	if got, want := dashboard.Stats.TotalSessions, 2; got != want {
+		t.Fatalf("total sessions = %d, want %d", got, want)
+	}
+
+	byID := make(map[string]SessionSummary)
+	for _, summary := range dashboard.Sessions {
+		byID[summary.ID] = summary
+	}
+	if !byID["cli-root"].UserInitiated {
+		t.Fatalf("cli-root should be user initiated")
+	}
+	if !byID["managed-codexflow"].UserInitiated {
+		t.Fatalf("managed-codexflow should be user initiated")
+	}
+	if byID["external-import"].UserInitiated {
+		t.Fatalf("external-import should not be user initiated")
+	}
+	if byID["agent-spawned"].UserInitiated {
+		t.Fatalf("agent-spawned should not be user initiated")
 	}
 }
 

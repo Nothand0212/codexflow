@@ -32,7 +32,10 @@ SessionGroups groupSessionsForAgent({
   required String selectedAgentId,
 }) {
   final filteredSessions = sessions
-      .where((session) => session.agentId == selectedAgentId)
+      .where(
+        (session) =>
+            session.agentId == selectedAgentId && session.userInitiated,
+      )
       .toList();
   final allowedSessionIds = filteredSessions
       .map((session) => session.id)

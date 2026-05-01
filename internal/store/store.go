@@ -28,6 +28,7 @@ type SessionBinding struct {
 type SessionRecord struct {
 	Thread  codex.Thread
 	Loaded  bool
+	Managed bool
 	Runtime SessionRuntime
 }
 
@@ -111,6 +112,7 @@ func (s *Store) ReplaceSessions(threads []codex.Thread, loaded map[string]bool) 
 
 		existing.Thread = mergeThread(existing.Thread, thread)
 		existing.Loaded = loaded[thread.ID]
+		existing.Managed = s.managedState[thread.ID]
 		if existing.Runtime.LatestDiffByTurn == nil {
 			existing.Runtime.LatestDiffByTurn = make(map[string]string)
 		}
@@ -130,6 +132,7 @@ func (s *Store) UpsertThread(thread codex.Thread) {
 	record, ok := s.sessions[thread.ID]
 	if !ok {
 		record = &SessionRecord{
+			Managed: s.managedState[thread.ID],
 			Runtime: SessionRuntime{
 				LatestDiffByTurn:  make(map[string]string),
 				LatestPlanByTurn:  make(map[string]codex.TurnPlanUpdatedNotification),
@@ -162,12 +165,13 @@ func (s *Store) SetSessionEnded(threadID string, ended bool) {
 func (s *Store) SetSessionManaged(threadID string, managed bool) {
 	s.mu.Lock()
 
-	_ = s.ensureSessionLocked(threadID)
+	record := s.ensureSessionLocked(threadID)
 	if managed {
 		s.managedState[threadID] = true
 	} else {
 		delete(s.managedState, threadID)
 	}
+	record.Managed = managed
 	persisted := s.persistedStateLocked(threadID)
 	localState := s.localState
 	s.mu.Unlock()
@@ -179,6 +183,7 @@ func (s *Store) DeleteSessionLocalState(threadID string) {
 	s.mu.Lock()
 	if record, ok := s.sessions[threadID]; ok {
 		record.Runtime.Ended = false
+		record.Managed = false
 	}
 	delete(s.endedState, threadID)
 	delete(s.managedState, threadID)
@@ -300,7 +305,8 @@ func (s *Store) ensureSessionLocked(threadID string) *SessionRecord {
 	}
 
 	record = &SessionRecord{
-		Thread: codex.Thread{ID: threadID},
+		Thread:  codex.Thread{ID: threadID},
+		Managed: s.managedState[threadID],
 		Runtime: SessionRuntime{
 			LatestDiffByTurn:  make(map[string]string),
 			LatestPlanByTurn:  make(map[string]codex.TurnPlanUpdatedNotification),

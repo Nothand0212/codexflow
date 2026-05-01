@@ -11,6 +11,9 @@ import '../theme/palette.dart';
 import '../widgets/common.dart';
 import 'approval_screen.dart';
 
+const int _initialTimelineMessageLimit = 80;
+const int _timelineMessagePageSize = 80;
+
 class SessionDetailScreen extends StatefulWidget {
   const SessionDetailScreen({super.key, required this.sessionId});
 
@@ -22,9 +25,13 @@ class SessionDetailScreen extends StatefulWidget {
 
 class _SessionDetailScreenState extends State<SessionDetailScreen> {
   late final TextEditingController _promptController;
+  late final ScrollController _scrollController;
   Timer? _timer;
   int _tick = 0;
   bool _isUploadingImage = false;
+  bool _isLoadingEarlierMessages = false;
+  String _lastTimelineSignature = '';
+  int _visibleTimelineMessageLimit = _initialTimelineMessageLimit;
   final ImagePicker _imagePicker = ImagePicker();
   final List<_ComposerAttachment> _attachments = <_ComposerAttachment>[];
 
@@ -32,8 +39,9 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
   void initState() {
     super.initState();
     _promptController = TextEditingController();
+    _scrollController = ScrollController();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      unawaited(_refreshSessionPage());
+      unawaited(_refreshSessionPage(refreshSkills: true));
       _timer = Timer.periodic(
         const Duration(seconds: 2),
         (_) => _pollIfNeeded(),
@@ -42,9 +50,19 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
   }
 
   @override
+  void didUpdateWidget(covariant SessionDetailScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.sessionId != widget.sessionId) {
+      _lastTimelineSignature = '';
+      _visibleTimelineMessageLimit = _initialTimelineMessageLimit;
+    }
+  }
+
+  @override
   void dispose() {
     _timer?.cancel();
     _promptController.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -93,10 +111,72 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     }
   }
 
-  Future<void> _refreshSessionPage() async {
+  Future<void> _refreshSessionPage({bool refreshSkills = false}) async {
     final model = context.read<AppModel>();
-    await model.refreshDashboard();
+    await model.refreshDashboard(refreshSkills: refreshSkills);
     await model.loadSession(widget.sessionId);
+  }
+
+  void _scheduleScrollToBottom(String signature) {
+    if (_lastTimelineSignature == signature) {
+      return;
+    }
+    _lastTimelineSignature = signature;
+    if (_isLoadingEarlierMessages) {
+      return;
+    }
+    _scrollToBottomWhenReady();
+  }
+
+  void _scrollToBottomWhenReady({int attempt = 0}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      if (!_scrollController.hasClients) {
+        if (attempt < 8) {
+          _scrollToBottomWhenReady(attempt: attempt + 1);
+        }
+        return;
+      }
+
+      final position = _scrollController.position;
+      final target = position.maxScrollExtent;
+      if ((position.pixels - target).abs() > 1) {
+        _scrollController.jumpTo(target);
+      }
+
+      // Markdown layout and restored images can increase maxScrollExtent over
+      // the next few frames. Keep pinning initial loads to the latest message
+      // until the layout settles.
+      if (attempt < 4) {
+        _scrollToBottomWhenReady(attempt: attempt + 1);
+      }
+    });
+  }
+
+  Future<void> _loadEarlierTimelineMessages({
+    required bool fetchEarlierFromServer,
+  }) async {
+    if (_isLoadingEarlierMessages) {
+      return;
+    }
+    setState(() {
+      _isLoadingEarlierMessages = fetchEarlierFromServer;
+      _visibleTimelineMessageLimit += _timelineMessagePageSize;
+    });
+    if (!fetchEarlierFromServer) {
+      return;
+    }
+    try {
+      await context.read<AppModel>().loadEarlierSessionTurns(widget.sessionId);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingEarlierMessages = false;
+        });
+      }
+    }
   }
 
   Future<void> _pickAndUploadImage() async {
@@ -164,30 +244,16 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
         : model.capabilitiesForSession(summary);
     final supportsApprovals = capabilities.supportsApprovals;
     final supportsInterruptTurn = capabilities.supportsInterruptTurn;
-    final supportsResume =
-        summary == null ? capabilities.supportsResume : model.canResumeSession(summary);
-    final orderedTurns = detail == null
-        ? const <TurnDetail>[]
-        : detail.turns.reversed.toList();
-    final activeTurn = orderedTurns.cast<TurnDetail?>().firstWhere(
-      (turn) => turn?.status == 'inProgress',
-      orElse: () => null,
-    );
-    final recentTurns = orderedTurns
-        .where((turn) => turn.id != activeTurn?.id)
-        .toList();
-    final sessionApprovals =
-        supportsApprovals ? _sessionApprovals(model) : <PendingRequestView>[];
-    final activeTurnApprovals = activeTurn == null
-        ? const <PendingRequestView>[]
-        : sessionApprovals
-              .where((approval) => approval.turnId == activeTurn.id)
-              .toList();
-    final remainingSessionApprovals = activeTurn == null
-        ? sessionApprovals
-        : sessionApprovals
-              .where((approval) => approval.turnId != activeTurn.id)
-              .toList();
+    final supportsResume = summary == null
+        ? capabilities.supportsResume
+        : model.canResumeSession(summary);
+    final sessionApprovals = supportsApprovals
+        ? _sessionApprovals(model)
+        : <PendingRequestView>[];
+    final agentProcessing = _isAgentProcessing(summary, sessionApprovals);
+    if (detail != null) {
+      _scheduleScrollToBottom(_timelineSignature(detail, sessionApprovals));
+    }
 
     return Scaffold(
       backgroundColor: Palette.canvas,
@@ -199,22 +265,23 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
         centerTitle: true,
       ),
       body: PageScaffold(
-        child: RefreshIndicator(
-          color: Palette.accent,
-          onRefresh: _refreshSessionPage,
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
-            children: <Widget>[
-              if (model.operationNotice.isNotEmpty) ...<Widget>[
-                Container(
+        child: Column(
+          children: <Widget>[
+            if (model.operationNotice.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                child: Container(
                   width: double.infinity,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
                   decoration: BoxDecoration(
-                    color: (model.operationNoticeIsError
-                            ? Palette.danger
-                            : Palette.success)
-                        .appOpacity(0.08),
+                    color:
+                        (model.operationNoticeIsError
+                                ? Palette.danger
+                                : Palette.success)
+                            .appOpacity(0.08),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Text(
@@ -228,175 +295,199 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 12),
-              ],
-              if (summary != null) ...<Widget>[
-                _SummaryCard(
-                  summary: summary,
-                  supportsApprovals: supportsApprovals,
-                ),
-                const SizedBox(height: 12),
-                if (supportsApprovals && remainingSessionApprovals.isNotEmpty) ...<Widget>[
-                  PanelCard(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Row(
-                          children: <Widget>[
-                            Text(
-                              '当前会话待审批',
-                              style: roundedTextStyle(
-                                size: 16,
-                                weight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              '${remainingSessionApprovals.length}',
-                              style: roundedTextStyle(
-                                size: 12,
-                                weight: FontWeight.w600,
-                                color: Palette.mutedInk,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        ApprovalList(
-                          approvals: remainingSessionApprovals,
-                          showSessionLabel: false,
-                        ),
-                      ],
-                    ),
+              ),
+            if (summary != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                child: _ChatSessionHeader(summary: summary),
+              ),
+            Expanded(
+              child: RefreshIndicator(
+                color: Palette.accent,
+                onRefresh: () => _refreshSessionPage(refreshSkills: true),
+                child: SelectionArea(
+                  child: ListView(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+                    children: detail == null
+                        ? <Widget>[_LoadingTimelineCard()]
+                        : _timelineChildren(
+                            detail,
+                            _emptyStateMessage(summary),
+                            agentProcessing,
+                          ),
                   ),
-                  const SizedBox(height: 12),
-                ],
-                if (summary.isEnded || !summary.loaded)
-                  _TakeoverCard(
-                    summary: summary,
-                    supportsResume: supportsResume,
-                    onPressed: () async {
-                      await model.resumeSession(summary);
-                      await _refreshSessionPage();
-                    },
-                  )
-                else
-                  _ComposerCard(
-                    summary: summary,
-                    promptController: _promptController,
-                    attachments: _attachments,
-                    isUploadingImage: _isUploadingImage,
-                    onPickImage: _pickAndUploadImage,
-                    onRemoveAttachment: (String id) {
-                      setState(() {
-                        _attachments.removeWhere((item) => item.id == id);
-                      });
-                    },
-                    onSubmit: () async {
-                      final sent = await model.submitPrompt(
-                        session: summary,
-                        prompt: _promptController.text.trim(),
-                        imageUploadIds: _attachments
-                            .map((item) => item.uploadId)
-                            .toList(),
-                      );
-                      if (sent) {
-                        _promptController.clear();
-                        setState(() {
-                          _attachments.clear();
-                        });
-                      }
-                    },
-                    supportsInterruptTurn: supportsInterruptTurn,
-                    onInterrupt: summary.lastTurnStatus == 'inProgress'
-                            && supportsInterruptTurn
-                        ? () async {
-                            await model.interrupt(summary);
+                ),
+              ),
+            ),
+            if (summary != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                child: summary.isEnded || !summary.loaded
+                    ? _TakeoverCard(
+                        summary: summary,
+                        supportsResume: supportsResume,
+                        onPressed: () async {
+                          await model.resumeSession(summary);
+                          await _refreshSessionPage();
+                        },
+                      )
+                    : _ComposerCard(
+                        summary: summary,
+                        skills: model.skills,
+                        promptController: _promptController,
+                        attachments: _attachments,
+                        isUploadingImage: _isUploadingImage,
+                        onPickImage: _pickAndUploadImage,
+                        onRemoveAttachment: (String id) {
+                          setState(() {
+                            _attachments.removeWhere((item) => item.id == id);
+                          });
+                        },
+                        onSubmit: () async {
+                          final sent = await model.submitPrompt(
+                            session: summary,
+                            prompt: _promptController.text.trim(),
+                            imageUploadIds: _attachments
+                                .map((item) => item.uploadId)
+                                .toList(),
+                          );
+                          if (sent) {
+                            _promptController.clear();
+                            setState(() {
+                              _attachments.clear();
+                            });
                           }
-                        : null,
-                    onEnd: () async {
-                      await model.endSession(summary);
-                      await _refreshSessionPage();
-                    },
-                  ),
-                const SizedBox(height: 12),
-              ],
-              if (detail != null) ...<Widget>[
-                if (detail.turns.isEmpty)
-                  PanelCard(
-                    compact: true,
-                    child: Text(
-                      _emptyStateMessage(summary),
-                      style: roundedTextStyle(
-                        size: 13,
-                        weight: FontWeight.w500,
-                        color: Palette.mutedInk,
+                        },
+                        supportsInterruptTurn: supportsInterruptTurn,
+                        onEnd: () async {
+                          await model.endSession(summary);
+                          await _refreshSessionPage();
+                        },
                       ),
-                    ),
-                  )
-                else ...<Widget>[
-                  if (activeTurn != null) ...<Widget>[
-                    Text(
-                      '当前运行中',
-                      style: roundedTextStyle(
-                        size: 16,
-                        weight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    ActiveTurnCard(
-                      turn: activeTurn,
-                      approvals: activeTurnApprovals,
-                    ),
-                    const SizedBox(height: 12),
-                  ],
-                  if (recentTurns.isNotEmpty) ...<Widget>[
-                    Text(
-                      '最近的 turn',
-                      style: roundedTextStyle(
-                        size: 16,
-                        weight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    ...recentTurns.map(
-                      (turn) => Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: TurnCard(turn: turn),
-                      ),
-                    ),
-                  ],
-                ],
-              ] else
-                PanelCard(
-                  compact: true,
-                  child: Row(
-                    children: <Widget>[
-                      const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Palette.accent,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Text(
-                        '正在加载会话详情…',
-                        style: roundedTextStyle(
-                          size: 13,
-                          weight: FontWeight.w500,
-                          color: Palette.mutedInk,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-          ),
+              ),
+          ],
         ),
       ),
     );
+  }
+
+  List<Widget> _timelineChildren(
+    SessionDetail detail,
+    String emptyMessage,
+    bool agentProcessing,
+  ) {
+    final window = _timelineWindow(detail);
+    if (window.totalCount == 0) {
+      return <Widget>[
+        if (agentProcessing)
+          const _AgentProcessingBubble()
+        else
+          PanelCard(
+            compact: true,
+            child: Text(
+              emptyMessage,
+              style: roundedTextStyle(
+                size: 13,
+                weight: FontWeight.w500,
+                color: Palette.mutedInk,
+              ),
+            ),
+          ),
+      ];
+    }
+
+    final children = <Widget>[
+      if (window.hiddenCount > 0 || detail.page.hasMoreBefore)
+        _LoadEarlierMessagesButton(
+          hiddenCount: window.hiddenCount,
+          pageSize: _timelineMessagePageSize,
+          loading: _isLoadingEarlierMessages,
+          serverHasMoreBefore: detail.page.hasMoreBefore,
+          onPressed: () => _loadEarlierTimelineMessages(
+            fetchEarlierFromServer: window.hiddenCount == 0,
+          ),
+        ),
+      ...window.items.map((item) => _TimelineItem(item: item)),
+      if (agentProcessing) const _AgentProcessingBubble(),
+    ];
+
+    return children
+        .map(
+          (child) =>
+              Padding(padding: const EdgeInsets.only(bottom: 10), child: child),
+        )
+        .toList();
+  }
+
+  _TimelineWindow _timelineWindow(SessionDetail detail) {
+    final newestItems = <TurnItem>[];
+    var totalCount = 0;
+    for (final turn in detail.turns.reversed) {
+      for (final item in turn.items.reversed) {
+        if (!_isConversationItem(item)) {
+          continue;
+        }
+        totalCount += 1;
+        if (newestItems.length < _visibleTimelineMessageLimit) {
+          newestItems.add(item);
+        }
+      }
+    }
+    return _TimelineWindow(
+      items: newestItems.reversed.toList(growable: false),
+      hiddenCount: totalCount - newestItems.length,
+      totalCount: totalCount,
+    );
+  }
+
+  bool _isConversationItem(TurnItem item) {
+    return item.type == 'userMessage' || item.type == 'agentMessage';
+  }
+
+  bool _isAgentProcessing(
+    SessionSummary? summary,
+    List<PendingRequestView> approvals,
+  ) {
+    if (summary == null || summary.isEnded) {
+      return false;
+    }
+    if (approvals.isNotEmpty || summary.hasWaitingState) {
+      return false;
+    }
+    return summary.lastTurnStatus == 'inProgress';
+  }
+
+  String _timelineSignature(
+    SessionDetail detail,
+    List<PendingRequestView> approvals,
+  ) {
+    final turnParts = detail.turns
+        .map((turn) {
+          return <String>[
+            turn.id,
+            turn.status,
+            '${turn.items.length}',
+            '${turn.durationMs}',
+            turn.error,
+            turn.items
+                .map(
+                  (item) => <String>[
+                    item.id,
+                    item.type,
+                    item.status,
+                    '${item.body.length}',
+                    '${item.auxiliary.length}',
+                  ].join(':'),
+                )
+                .join(','),
+          ].join(':');
+        })
+        .join('|');
+    final approvalParts = approvals
+        .map((approval) => '${approval.id}:${approval.turnId}:${approval.kind}')
+        .join('|');
+    return '$turnParts#$approvalParts';
   }
 
   String _emptyStateMessage(SessionSummary? summary) {
@@ -410,167 +501,123 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
   }
 }
 
-class _SummaryCard extends StatelessWidget {
-  const _SummaryCard({
-    required this.summary,
-    required this.supportsApprovals,
+class _TimelineWindow {
+  const _TimelineWindow({
+    required this.items,
+    required this.hiddenCount,
+    required this.totalCount,
   });
 
-  final SessionSummary summary;
-  final bool supportsApprovals;
+  final List<TurnItem> items;
+  final int hiddenCount;
+  final int totalCount;
+}
+
+class _LoadEarlierMessagesButton extends StatelessWidget {
+  const _LoadEarlierMessagesButton({
+    required this.hiddenCount,
+    required this.pageSize,
+    required this.loading,
+    required this.serverHasMoreBefore,
+    required this.onPressed,
+  });
+
+  final int hiddenCount;
+  final int pageSize;
+  final bool loading;
+  final bool serverHasMoreBefore;
+  final Future<void> Function() onPressed;
 
   @override
   Widget build(BuildContext context) {
-    final stateTone = summary.isEnded
-        ? Palette.mutedInk
-        : ((supportsApprovals && summary.pendingApprovals > 0)
-              ? Palette.warning
-              : (summary.loaded ? Palette.success : Palette.softBlue));
+    final count = hiddenCount < pageSize ? hiddenCount : pageSize;
+    final subtitle = hiddenCount > 0
+        ? '还有 $hiddenCount 条，先加载 $count 条'
+        : (serverHasMoreBefore ? '从电脑端按需加载' : '');
+    return Center(
+      child: TextButton.icon(
+        onPressed: loading ? null : onPressed,
+        icon: loading
+            ? const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.keyboard_arrow_up_rounded, size: 18),
+        label: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Text(
+              loading ? '正在加载…' : '加载更早消息',
+              style: roundedTextStyle(size: 12, weight: FontWeight.w700),
+            ),
+            if (subtitle.isNotEmpty)
+              Text(
+                subtitle,
+                style: roundedTextStyle(
+                  size: 10,
+                  weight: FontWeight.w600,
+                  color: Palette.softBlue.appOpacity(0.72),
+                ),
+              ),
+          ],
+        ),
+        style: TextButton.styleFrom(
+          foregroundColor: Palette.softBlue,
+          backgroundColor: Palette.softBlue.appOpacity(0.10),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(999),
+            side: BorderSide(color: Palette.softBlue.appOpacity(0.16)),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
-    return PanelCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+class _ChatSessionHeader extends StatelessWidget {
+  const _ChatSessionHeader({required this.summary});
+
+  final SessionSummary summary;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Palette.panelStrong,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Palette.line),
+      ),
+      child: Row(
         children: <Widget>[
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(
-                      summary.displayName,
-                      style: roundedTextStyle(
-                        size: 16,
-                        weight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 5),
-                    Text(
-                      summary.cwd,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: roundedTextStyle(
-                        size: 12,
-                        weight: FontWeight.w500,
-                        color: Palette.mutedInk,
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 10),
-              StatusPill(
-                status: summary.status,
-                waiting: summary.hasWaitingState,
-                ended: summary.isEnded,
-              ),
-            ],
+          StatusPill(
+            status: summary.status,
+            waiting: summary.hasWaitingState,
+            ended: summary.isEnded,
           ),
-          const SizedBox(height: 12),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: <Widget>[
-                CapsuleTag(
-                  title: '托管',
-                  value: summary.loaded ? '已接管' : '未接管',
-                ),
-                if (summary.isClaudeSession) ...<Widget>[
-                  const SizedBox(width: 8),
-                  CapsuleTag(
-                    title: '链路',
-                    value: summary.runtimeAvailable ? 'Runtime' : 'History',
-                  ),
-                  if (summary.loaded && summary.runtimeAttachMode.isNotEmpty) ...<Widget>[
-                    const SizedBox(width: 8),
-                    CapsuleTag(
-                      title: '接管',
-                      value: summary.runtimeAttachMode == 'resumed_existing'
-                          ? '现有 Runtime'
-                          : (summary.runtimeAttachMode == 'opened_from_history'
-                              ? '历史新开'
-                              : '新建 Runtime'),
-                    ),
-                  ],
-                ],
-                const SizedBox(width: 8),
-                CapsuleTag(title: '来源', value: summary.source),
-                const SizedBox(width: 8),
-                CapsuleTag(
-                  title: '分支',
-                  value: summary.branch.isEmpty ? '未识别' : summary.branch,
-                ),
-                const SizedBox(width: 8),
-                CapsuleTag(title: '模型', value: summary.modelProvider),
-              ],
-            ),
-          ),
-          if (summary.previewSummary.isNotEmpty &&
-              summary.previewSummary != summary.displayName) ...<Widget>[
-            const SizedBox(height: 12),
-            Text(
-              '首条消息',
-              style: roundedTextStyle(
-                size: 12,
-                weight: FontWeight.w600,
-                color: Palette.mutedInk,
-              ),
-            ),
-            const SizedBox(height: 4),
-            HeadTailExcerptBlock(
-              raw: summary.preview,
-              head: 170,
-              tail: 110,
-              style: roundedTextStyle(
-                size: 13,
-                weight: FontWeight.w500,
-                color: Palette.mutedInk,
-                height: 1.45,
-              ),
-            ),
-          ],
-          if (supportsApprovals && summary.pendingApprovals > 0) ...<Widget>[
-            const SizedBox(height: 12),
-            Text(
-              '这个会话当前有 ${summary.pendingApprovals} 个审批等待处理，你可以直接在下面处理，也可以去“审批”页集中处理。',
-              style: roundedTextStyle(
-                size: 13,
-                weight: FontWeight.w500,
-                color: Palette.warning,
-                height: 1.45,
-              ),
-            ),
-          ],
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: stateTone.appOpacity(0.10),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Container(
-                  width: 4,
-                  height: 56,
-                  decoration: BoxDecoration(
-                    color: stateTone,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
+                Text(
+                  summary.displayName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: roundedTextStyle(size: 14, weight: FontWeight.w700),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _actionSummary(summary),
-                    style: roundedTextStyle(
-                      size: 13,
-                      weight: FontWeight.w500,
-                      color: stateTone,
-                      height: 1.45,
-                    ),
+                const SizedBox(height: 3),
+                Text(
+                  summary.cwd,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: roundedTextStyle(
+                    size: 11,
+                    weight: FontWeight.w500,
+                    color: Palette.mutedInk,
+                    fontFamily: 'monospace',
                   ),
                 ),
               ],
@@ -580,36 +627,230 @@ class _SummaryCard extends StatelessWidget {
       ),
     );
   }
+}
 
-  String _actionSummary(SessionSummary summary) {
-    if (summary.isEnded) {
-      return '这个会话已经在 CodexFlow 中结束。历史和 turn 会保留，但不再由 CodexFlow 托管；如需继续，请重新接管。';
+class _LoadingTimelineCard extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return PanelCard(
+      compact: true,
+      child: Row(
+        children: <Widget>[
+          const SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: Palette.accent,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Text(
+            '正在加载会话详情…',
+            style: roundedTextStyle(
+              size: 13,
+              weight: FontWeight.w500,
+              color: Palette.mutedInk,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TimelineItem extends StatelessWidget {
+  const _TimelineItem({required this.item});
+
+  final TurnItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    switch (item.type) {
+      case 'userMessage':
+        return _ChatBubble(body: item.body, outgoing: true, title: '你');
+      case 'agentMessage':
+        return _ChatBubble(
+          body: item.body,
+          outgoing: false,
+          title: 'Codex',
+          markdown: true,
+        );
+      default:
+        return const SizedBox.shrink();
     }
-    if (summary.isClaudeSession &&
-        summary.loaded &&
-        summary.runtimeAttachMode == 'resumed_existing') {
-      return '当前这条 Claude 会话已经重新接入现有 runtime。你现在看到的是原 runtime 的继续态，可以直接开始下一轮或继续处理中断。';
-    }
-    if (summary.isClaudeSession &&
-        summary.loaded &&
-        summary.runtimeAttachMode == 'opened_from_history') {
-      return '当前这条 Claude 会话由 CodexFlow 新开 runtime 托管。历史 transcript 会继续保留显示，但后续运行状态来自这条新 runtime。';
-    }
-    if (summary.isClaudeSession &&
-        summary.loaded &&
-        summary.runtimeAttachMode == 'new_session') {
-      return '这是由 CodexFlow 新建的 Claude 会话。当前 runtime 和历史从一开始就是同一条链路。';
-    }
-    if (!summary.loaded && summary.lastTurnStatus == 'inProgress') {
-      return '这个会话当前还没被 CodexFlow 接管。现在只能查看历史；点下面“Resume 并接管会话”后，才可以继续 steer、处理中断和刷新运行状态。';
-    }
-    if (summary.lastTurnStatus == 'inProgress') {
-      return '当前有一轮正在运行。这个页面会自动刷新最近 turn 的内容；你也可以继续 steer 或中断。';
-    }
-    if (summary.loaded) {
-      return '当前没有运行中的 turn。你可以直接输入新的 prompt，开始下一轮。';
-    }
-    return '这个会话当前未接管。你可以查看历史；如果需要继续执行，先接管到 CodexFlow 后台。';
+  }
+}
+
+class _ChatBubble extends StatelessWidget {
+  const _ChatBubble({
+    required this.body,
+    required this.outgoing,
+    required this.title,
+    this.markdown = false,
+  });
+
+  final String body;
+  final bool outgoing;
+  final String title;
+  final bool markdown;
+
+  @override
+  Widget build(BuildContext context) {
+    final maxWidth = MediaQuery.of(context).size.width * 0.78;
+    final background = outgoing ? Palette.softBlue : Palette.panelStrong;
+    final foreground = outgoing ? Colors.white : Palette.ink;
+    final borderRadius = BorderRadius.only(
+      topLeft: const Radius.circular(16),
+      topRight: const Radius.circular(16),
+      bottomLeft: Radius.circular(outgoing ? 16 : 4),
+      bottomRight: Radius.circular(outgoing ? 4 : 16),
+    );
+
+    return Align(
+      alignment: outgoing ? Alignment.centerRight : Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: background,
+            borderRadius: borderRadius,
+            border: outgoing ? null : Border.all(color: Palette.line),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                title,
+                style: roundedTextStyle(
+                  size: 11,
+                  weight: FontWeight.w700,
+                  color: outgoing ? Colors.white70 : Palette.mutedInk,
+                ),
+              ),
+              const SizedBox(height: 5),
+              if (markdown && !outgoing)
+                MarkdownBodyBlock(raw: body)
+              else
+                Text(
+                  body,
+                  style: roundedTextStyle(
+                    size: 13,
+                    weight: FontWeight.w500,
+                    color: foreground,
+                    height: 1.45,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AgentProcessingBubble extends StatefulWidget {
+  const _AgentProcessingBubble();
+
+  @override
+  State<_AgentProcessingBubble> createState() => _AgentProcessingBubbleState();
+}
+
+class _AgentProcessingBubbleState extends State<_AgentProcessingBubble>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final maxWidth = MediaQuery.of(context).size.width * 0.78;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: Palette.panelStrong,
+            borderRadius: const BorderRadius.only(
+              topLeft: Radius.circular(16),
+              topRight: Radius.circular(16),
+              bottomLeft: Radius.circular(4),
+              bottomRight: Radius.circular(16),
+            ),
+            border: Border.all(color: Palette.line),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Palette.accent,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                'Codex 正在处理',
+                style: roundedTextStyle(
+                  size: 12,
+                  weight: FontWeight.w700,
+                  color: Palette.ink,
+                ),
+              ),
+              const SizedBox(width: 6),
+              AnimatedBuilder(
+                animation: _controller,
+                builder: (BuildContext context, Widget? child) {
+                  return Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: List<Widget>.generate(3, (index) {
+                      final phase = (_controller.value * 3 + index) % 3;
+                      final scale = phase < 1
+                          ? 0.72 + phase * 0.28
+                          : (phase < 2 ? 1 - (phase - 1) * 0.28 : 0.72);
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 1.5),
+                        child: Transform.scale(
+                          scale: scale,
+                          child: Container(
+                            width: 4,
+                            height: 4,
+                            decoration: BoxDecoration(
+                              color: Palette.accent.appOpacity(
+                                0.55 + scale * 0.35,
+                              ),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                        ),
+                      );
+                    }),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -652,13 +893,15 @@ class _TakeoverCard extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           ActionButton(
-            title: (!summary.isEnded &&
+            title:
+                (!summary.isEnded &&
                     summary.isClaudeSession &&
                     !summary.runtimeAvailable)
                 ? '当前无 Runtime'
                 : (summary.isEnded ? '重新接管会话' : 'Resume 并接管会话'),
-            background:
-                supportsResume ? Palette.softBlue : Palette.mutedInk.appOpacity(0.35),
+            background: supportsResume
+                ? Palette.softBlue
+                : Palette.mutedInk.appOpacity(0.35),
             foreground: Colors.white,
             fontSize: 14,
             enabled: supportsResume,
@@ -710,6 +953,7 @@ class _ComposerAttachment {
 class _ComposerCard extends StatelessWidget {
   const _ComposerCard({
     required this.summary,
+    required this.skills,
     required this.promptController,
     required this.attachments,
     required this.isUploadingImage,
@@ -717,11 +961,11 @@ class _ComposerCard extends StatelessWidget {
     required this.onRemoveAttachment,
     required this.onSubmit,
     required this.supportsInterruptTurn,
-    required this.onInterrupt,
     required this.onEnd,
   });
 
   final SessionSummary summary;
+  final List<AgentSkill> skills;
   final TextEditingController promptController;
   final List<_ComposerAttachment> attachments;
   final bool isUploadingImage;
@@ -729,7 +973,6 @@ class _ComposerCard extends StatelessWidget {
   final void Function(String id) onRemoveAttachment;
   final Future<void> Function() onSubmit;
   final bool supportsInterruptTurn;
-  final Future<void> Function()? onInterrupt;
   final Future<void> Function() onEnd;
 
   @override
@@ -741,74 +984,37 @@ class _ComposerCard extends StatelessWidget {
       builder: (BuildContext context, Widget? child) {
         final trimmedPrompt = promptController.text.trim();
         final canSubmit = trimmedPrompt.isNotEmpty || attachments.isNotEmpty;
-        return PanelCard(
+        return Container(
+          padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+          decoration: BoxDecoration(
+            color: Palette.panelStrong,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Palette.line),
+            boxShadow: const <BoxShadow>[
+              BoxShadow(
+                color: Color.fromRGBO(0, 0, 0, 0.08),
+                blurRadius: 12,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: <Widget>[
               Row(
                 children: <Widget>[
-                  Text(
-                    isSteering ? '继续当前 turn' : '开始下一轮',
-                    style: roundedTextStyle(size: 16, weight: FontWeight.w600),
+                  _ComposerToolButton(
+                    icon: Icons.auto_awesome_rounded,
+                    title: 'Skills',
+                    onTap: () => _showSkillsSheet(context),
                   ),
-                  const Spacer(),
-                  Text(
-                    isSteering ? 'steer' : 'new turn',
-                    style: roundedTextStyle(
-                      size: 11,
-                      weight: FontWeight.w700,
-                      color: accentTone,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                isSteering ? '补充调整方向或新增约束。' : '输入新的 prompt，继续这个会话。',
-                style: roundedTextStyle(
-                  size: 13,
-                  weight: FontWeight.w500,
-                  color: Palette.mutedInk,
-                ),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: <Widget>[
+                  const SizedBox(width: 8),
                   Opacity(
                     opacity: isUploadingImage ? 0.45 : 1,
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(10),
+                    child: _ComposerToolButton(
+                      icon: Icons.photo_rounded,
+                      title: isUploadingImage ? '上传中…' : '添加图片',
                       onTap: isUploadingImage ? null : onPickImage,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 8,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Palette.shell,
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: Palette.line),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: <Widget>[
-                            const Icon(
-                              Icons.photo,
-                              size: 14,
-                              color: Palette.ink,
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              isUploadingImage ? '上传中…' : '添加图片',
-                              style: roundedTextStyle(
-                                size: 12,
-                                weight: FontWeight.w600,
-                                color: Palette.ink,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
                     ),
                   ),
                   const SizedBox(width: 10),
@@ -821,10 +1027,25 @@ class _ComposerCard extends StatelessWidget {
                         color: Palette.mutedInk,
                       ),
                     ),
+                  const Spacer(),
+                  IconButton(
+                    tooltip: isSteering ? '中断并结束' : '结束会话',
+                    visualDensity: VisualDensity.compact,
+                    icon: Icon(
+                      isSteering
+                          ? Icons.stop_circle_rounded
+                          : Icons.stop_circle_outlined,
+                      color: Palette.danger,
+                    ),
+                    onPressed: () async {
+                      FocusScope.of(context).unfocus();
+                      await onEnd();
+                    },
+                  ),
                 ],
               ),
               if (attachments.isNotEmpty) ...<Widget>[
-                const SizedBox(height: 10),
+                const SizedBox(height: 6),
                 SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
                   child: Row(
@@ -839,8 +1060,8 @@ class _ComposerCard extends StatelessWidget {
                                   borderRadius: BorderRadius.circular(10),
                                   child: Image.memory(
                                     attachment.bytes,
-                                    width: 76,
-                                    height: 76,
+                                    width: 44,
+                                    height: 44,
                                     fit: BoxFit.cover,
                                   ),
                                 ),
@@ -866,79 +1087,77 @@ class _ComposerCard extends StatelessWidget {
                   ),
                 ),
               ],
-              const SizedBox(height: 12),
-              CodexTextField(
-                controller: promptController,
-                hintText: isSteering
-                    ? '例如：先别改接口，优先把测试补齐。'
-                    : '例如：继续实现剩余部分，并补上验证。',
-                maxLines: 6,
-                minLines: 6,
-                autocapitalization: TextCapitalization.sentences,
-              ),
-              const SizedBox(height: 12),
-              ActionButton(
-                title: isSteering ? '发送 steer' : '开始这一轮',
-                background: accentTone,
-                foreground: Colors.white,
-                icon: isSteering ? Icons.alt_route : Icons.auto_awesome,
-                fontSize: 14,
-                enabled: canSubmit && !isUploadingImage,
-                onPressed: () async {
-                  FocusScope.of(context).unfocus();
-                  await onSubmit();
-                },
-              ),
-              const SizedBox(height: 10),
-              if (isSteering)
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: ActionButton(
-                        title: '先中断本轮',
-                        background: Palette.warning.appOpacity(0.12),
-                        foreground: Palette.warning,
-                        borderColor: Palette.warning.appOpacity(0.18),
-                        icon: Icons.pause,
-                        fontSize: 14,
-                        onPressed: onInterrupt == null
-                            ? null
-                            : () async {
-                                FocusScope.of(context).unfocus();
-                                await onInterrupt!();
-                              },
+              const SizedBox(height: 8),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: <Widget>[
+                  Expanded(
+                    child: TextField(
+                      controller: promptController,
+                      minLines: 1,
+                      maxLines: 4,
+                      textCapitalization: TextCapitalization.sentences,
+                      style: roundedTextStyle(
+                        size: 14,
+                        weight: FontWeight.w500,
+                        color: Palette.ink,
+                        height: 1.35,
+                      ),
+                      cursorColor: Palette.softBlue,
+                      decoration: InputDecoration(
+                        hintText: isSteering ? '继续当前 turn' : '输入消息',
+                        hintStyle: roundedTextStyle(
+                          size: 14,
+                          weight: FontWeight.w500,
+                          color: Palette.mutedInk,
+                        ),
+                        filled: true,
+                        fillColor: Palette.shell,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(18),
+                          borderSide: const BorderSide(color: Palette.line),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(18),
+                          borderSide: BorderSide(
+                            color: accentTone.appOpacity(0.45),
+                          ),
+                        ),
                       ),
                     ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: ActionButton(
-                        title: '中断并结束',
-                        background: Palette.danger.appOpacity(0.12),
-                        foreground: Palette.danger,
-                        borderColor: Palette.danger.appOpacity(0.18),
-                        icon: Icons.stop,
-                        fontSize: 14,
-                        onPressed: () async {
-                          FocusScope.of(context).unfocus();
-                          await onEnd();
-                        },
-                      ),
-                    ),
-                  ],
-                )
-              else
-                ActionButton(
-                  title: '结束这个会话',
-                  background: Palette.danger.appOpacity(0.10),
-                  foreground: Palette.danger,
-                  borderColor: Palette.danger.appOpacity(0.16),
-                  icon: Icons.stop_circle_outlined,
-                  fontSize: 14,
-                  onPressed: () async {
-                    FocusScope.of(context).unfocus();
-                    await onEnd();
-                  },
                   ),
+                  const SizedBox(width: 8),
+                  Material(
+                    color: canSubmit && !isUploadingImage
+                        ? accentTone
+                        : Palette.mutedInk.appOpacity(0.35),
+                    shape: const CircleBorder(),
+                    child: InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: canSubmit && !isUploadingImage
+                          ? () async {
+                              FocusScope.of(context).unfocus();
+                              await onSubmit();
+                            }
+                          : null,
+                      child: Padding(
+                        padding: const EdgeInsets.all(11),
+                        child: Icon(
+                          isSteering
+                              ? Icons.alt_route_rounded
+                              : Icons.arrow_upward_rounded,
+                          color: Colors.white,
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
               if (isSteering && !supportsInterruptTurn) ...<Widget>[
                 const SizedBox(height: 8),
                 Text(
@@ -955,6 +1174,259 @@ class _ComposerCard extends StatelessWidget {
         );
       },
     );
+  }
+
+  Future<void> _showSkillsSheet(BuildContext context) async {
+    final skill = await showModalBottomSheet<AgentSkill>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (BuildContext context) {
+        return _SkillsSheet(skills: skills);
+      },
+    );
+    if (skill == null) {
+      return;
+    }
+    _insertText(skill.insertText);
+  }
+
+  void _insertText(String value) {
+    final selection = promptController.selection;
+    final text = promptController.text;
+    final start = selection.isValid ? selection.start : text.length;
+    final end = selection.isValid ? selection.end : text.length;
+    final nextText = text.replaceRange(start, end, value);
+    final offset = start + value.length;
+    promptController.value = TextEditingValue(
+      text: nextText,
+      selection: TextSelection.collapsed(offset: offset),
+    );
+  }
+}
+
+class _ComposerToolButton extends StatelessWidget {
+  const _ComposerToolButton({
+    required this.icon,
+    required this.title,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: Palette.shell,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Palette.line),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(icon, size: 14, color: Palette.ink),
+            const SizedBox(width: 6),
+            Text(
+              title,
+              style: roundedTextStyle(
+                size: 12,
+                weight: FontWeight.w600,
+                color: Palette.ink,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SkillsSheet extends StatefulWidget {
+  const _SkillsSheet({required this.skills});
+
+  final List<AgentSkill> skills;
+
+  @override
+  State<_SkillsSheet> createState() => _SkillsSheetState();
+}
+
+class _SkillsSheetState extends State<_SkillsSheet> {
+  late final TextEditingController _queryController;
+
+  @override
+  void initState() {
+    super.initState();
+    _queryController = TextEditingController()..addListener(_onQueryChanged);
+  }
+
+  @override
+  void dispose() {
+    _queryController
+      ..removeListener(_onQueryChanged)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _onQueryChanged() {
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final query = _queryController.text.trim().toLowerCase();
+    final skills = _sortedSkills(
+      widget.skills,
+    ).where((skill) => _matchesSkill(skill, query)).toList(growable: false);
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
+
+    return Padding(
+      padding: EdgeInsets.only(bottom: bottomInset),
+      child: Container(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.78,
+        ),
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+        decoration: const BoxDecoration(
+          color: Palette.canvas,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+        ),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Container(
+                width: 44,
+                height: 5,
+                decoration: BoxDecoration(
+                  color: Palette.line,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _queryController,
+                autofocus: true,
+                textInputAction: TextInputAction.search,
+                style: roundedTextStyle(
+                  size: 14,
+                  weight: FontWeight.w600,
+                  color: Palette.ink,
+                ),
+                decoration: InputDecoration(
+                  hintText: '搜索 Skills',
+                  prefixIcon: const Icon(
+                    Icons.search_rounded,
+                    color: Palette.mutedInk,
+                  ),
+                  filled: true,
+                  fillColor: Palette.shell,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: const BorderSide(color: Palette.line),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: BorderSide(
+                      color: Palette.softBlue.appOpacity(0.45),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Flexible(
+                child: skills.isEmpty
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 28),
+                          child: Text(
+                            widget.skills.isEmpty ? '暂无可用 Skills' : '没有匹配项',
+                            style: roundedTextStyle(
+                              size: 13,
+                              weight: FontWeight.w600,
+                              color: Palette.mutedInk,
+                            ),
+                          ),
+                        ),
+                      )
+                    : ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: skills.length,
+                        separatorBuilder: (_, __) => Divider(
+                          height: 1,
+                          color: Palette.line.appOpacity(0.65),
+                        ),
+                        itemBuilder: (BuildContext context, int index) {
+                          final skill = skills[index];
+                          final subtitle = skill.description.isNotEmpty
+                              ? skill.description
+                              : skill.insertText.trim();
+                          return ListTile(
+                            dense: true,
+                            leading: const Icon(
+                              Icons.auto_awesome_rounded,
+                              color: Palette.softBlue,
+                            ),
+                            title: Text(
+                              skill.name,
+                              style: roundedTextStyle(
+                                size: 14,
+                                weight: FontWeight.w700,
+                              ),
+                            ),
+                            subtitle: Text(
+                              subtitle,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: roundedTextStyle(
+                                size: 12,
+                                weight: FontWeight.w500,
+                                color: Palette.mutedInk,
+                              ),
+                            ),
+                            onTap: () => Navigator.of(context).pop(skill),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<AgentSkill> _sortedSkills(List<AgentSkill> skills) {
+    final sorted = <AgentSkill>[...skills];
+    sorted.sort((left, right) {
+      final leftName = left.name.toLowerCase();
+      final rightName = right.name.toLowerCase();
+      if (leftName == rightName) {
+        return left.name.compareTo(right.name);
+      }
+      return leftName.compareTo(rightName);
+    });
+    return sorted;
+  }
+
+  bool _matchesSkill(AgentSkill skill, String query) {
+    if (query.isEmpty) {
+      return true;
+    }
+    return skill.name.toLowerCase().contains(query) ||
+        skill.description.toLowerCase().contains(query) ||
+        skill.insertText.toLowerCase().contains(query);
   }
 }
 

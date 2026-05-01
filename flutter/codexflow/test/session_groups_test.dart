@@ -67,6 +67,21 @@ void main() {
         expect(groups.pendingApprovalCount, 1);
       },
     );
+
+    test('hides agent-initiated sessions from visible session groups', () {
+      final userSession = _session(id: 'user-session', userInitiated: true);
+      final agentSession = _session(id: 'agent-session', userInitiated: false);
+
+      final groups = groupSessionsForAgent(
+        sessions: <SessionSummary>[userSession, agentSession],
+        approvals: const <PendingRequestView>[],
+        selectedAgentId: 'codex',
+      );
+
+      expect(groups.sessions, <SessionSummary>[userSession]);
+      expect(groups.managed, <SessionSummary>[userSession]);
+      expect(groups.history, isEmpty);
+    });
   });
 }
 
@@ -77,6 +92,7 @@ SessionSummary _session({
   String status = 'idle',
   bool loaded = false,
   bool ended = false,
+  bool userInitiated = true,
   int pendingApprovals = 0,
 }) {
   return SessionSummary(
@@ -105,6 +121,7 @@ SessionSummary _session({
     resumeAvailable: true,
     resumeBlockedReason: '',
     ended: ended,
+    userInitiated: userInitiated,
   );
 }
 

@@ -42,16 +42,33 @@ class CodexFlowNotifications(private val context: Context) {
     }
 
     fun persistent(status: MonitorStatus?): Notification {
-        val title = if (status == null) {
-            "CodexFlow starting - pending --"
-        } else {
-            "CodexFlow ${if (status.online) "online" else "offline"} - running ${status.runningManagedCount} - pending ${status.pendingManualActionCount}"
+        val title = when {
+            status == null -> "CodexFlow starting"
+            status.online -> "CodexFlow online"
+            else -> "CodexFlow offline"
         }
-        val text = status?.hostPort?.ifBlank { "Loading agent status" } ?: "Loading agent status"
+        val text = if (status == null) {
+            "Loading agent status"
+        } else {
+            "Managed ${status.runningManagedCount} · Pending ${status.pendingManualActionCount}"
+        }
+        val expandedText = if (status == null) {
+            "Agent: starting\nStatus: loading\nTap to open CodexFlow"
+        } else {
+            listOf(
+                "Agent: ${if (status.online) "online" else "offline"}",
+                "Host: ${status.hostPort.ifBlank { "unknown" }}",
+                "Managed sessions: ${status.runningManagedCount}",
+                "Pending manual actions: ${status.pendingManualActionCount}",
+                "Tap to open dashboard",
+            ).joinToString("\n")
+        }
         return NotificationCompat.Builder(context, CHANNEL_STATUS)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(title)
             .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
+            .setSubText(status?.hostPort?.takeIf { it.isNotBlank() })
             .setOngoing(true)
             .setSilent(true)
             .setOnlyAlertOnce(true)

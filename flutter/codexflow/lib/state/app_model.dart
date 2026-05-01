@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -48,6 +49,7 @@ class AppModel extends ChangeNotifier {
 
   static const _baseUrlKey = 'codexflow.baseURL';
   static const _monitorEnabledKey = 'codexflow.monitor.enabled';
+  static const _sessionDetailTurnPageSize = 40;
 
   final SharedPreferences _prefs;
   final AndroidMonitorBridgeApi _monitorBridge;
@@ -59,11 +61,13 @@ class AppModel extends ChangeNotifier {
   String appVersionName;
   int appBuildNumber;
   DashboardResponse dashboard = DashboardResponse.placeholder();
+  List<AgentSkill> skills = const <AgentSkill>[];
   final Map<String, SessionDetail> sessionDetails = <String, SessionDetail>{};
   bool isRefreshing = false;
   bool isBootstrapped = false;
   bool isAgentOnline = false;
   String agentConnectionError = '';
+  String skillsError = '';
   String connectionError = '';
   String operationNotice = '';
   bool operationNoticeIsError = false;
@@ -159,7 +163,7 @@ class AppModel extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> refreshDashboard() async {
+  Future<void> refreshDashboard({bool refreshSkills = true}) async {
     if (isRefreshing) {
       return;
     }
@@ -167,12 +171,16 @@ class AppModel extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final latestDashboard = await _client().dashboard();
+      final client = _client();
+      final latestDashboard = await client.dashboard();
       dashboard = latestDashboard;
       _syncSelectedAgent(latestDashboard);
       _consecutiveDashboardFailures = 0;
       isAgentOnline = latestDashboard.agent.connected;
       agentConnectionError = '';
+      if (refreshSkills) {
+        await _refreshSkillsWithClient(client);
+      }
     } catch (error) {
       _consecutiveDashboardFailures += 1;
       if (_consecutiveDashboardFailures >= 2 || !isAgentOnline) {
@@ -182,6 +190,20 @@ class AppModel extends ChangeNotifier {
     } finally {
       isRefreshing = false;
       notifyListeners();
+    }
+  }
+
+  Future<void> refreshSkills() async {
+    await _refreshSkillsWithClient(_client());
+    notifyListeners();
+  }
+
+  Future<void> _refreshSkillsWithClient(ApiClient client) async {
+    try {
+      skills = await client.skills();
+      skillsError = '';
+    } catch (error) {
+      skillsError = error.toString();
     }
   }
 
@@ -197,8 +219,39 @@ class AppModel extends ChangeNotifier {
 
   Future<void> loadSession(String id) async {
     try {
-      final detail = await _client().sessionDetail(id);
+      final existing = sessionDetails[id];
+      final turnLimit = math.max(
+        _sessionDetailTurnPageSize,
+        existing?.turns.length ?? 0,
+      );
+      final detail = await _client().sessionDetail(id, turnLimit: turnLimit);
       sessionDetails[id] = detail;
+      connectionError = '';
+      notifyListeners();
+    } catch (error) {
+      connectionError = error.toString();
+      notifyListeners();
+    }
+  }
+
+  Future<void> loadEarlierSessionTurns(String id) async {
+    final current = sessionDetails[id];
+    if (current == null) {
+      await loadSession(id);
+      return;
+    }
+    if (!current.page.hasMoreBefore) {
+      return;
+    }
+
+    try {
+      final earlier = await _client().sessionDetail(
+        id,
+        turnOffset: current.turns.length,
+        turnLimit: _sessionDetailTurnPageSize,
+      );
+      final latest = sessionDetails[id] ?? current;
+      sessionDetails[id] = latest.mergeEarlier(earlier);
       connectionError = '';
       notifyListeners();
     } catch (error) {
@@ -221,7 +274,7 @@ class AppModel extends ChangeNotifier {
       _upsertSessionSummary(createdSession);
       connectionError = '';
       showNotice('会话已创建。');
-      await refreshDashboard();
+      await refreshDashboard(refreshSkills: false);
       await loadSession(createdSession.id);
       return true;
     } catch (error) {
@@ -247,7 +300,7 @@ class AppModel extends ChangeNotifier {
       _upsertSessionSummary(updatedSession);
       connectionError = '';
       showNotice(_resumeSuccessNotice(updatedSession));
-      await refreshDashboard();
+      await refreshDashboard(refreshSkills: false);
       await loadSession(session.id);
     } catch (error) {
       connectionError = error.toString();
@@ -260,7 +313,7 @@ class AppModel extends ChangeNotifier {
     try {
       await _client().archiveSession(session.id);
       sessionDetails.remove(session.id);
-      await refreshDashboard();
+      await refreshDashboard(refreshSkills: false);
     } catch (error) {
       connectionError = error.toString();
       notifyListeners();
@@ -270,7 +323,7 @@ class AppModel extends ChangeNotifier {
   Future<void> endSession(SessionSummary session) async {
     try {
       await _client().endSession(session.id);
-      await refreshDashboard();
+      await refreshDashboard(refreshSkills: false);
       await loadSession(session.id);
     } catch (error) {
       connectionError = error.toString();
@@ -304,7 +357,7 @@ class AppModel extends ChangeNotifier {
           imageUploadIds: imageUploadIds,
         );
       }
-      await refreshDashboard();
+      await refreshDashboard(refreshSkills: false);
       await loadSession(session.id);
       return true;
     } catch (error) {
@@ -337,7 +390,7 @@ class AppModel extends ChangeNotifier {
         sessionId: session.id,
         turnId: session.lastTurnId,
       );
-      await refreshDashboard();
+      await refreshDashboard(refreshSkills: false);
     } catch (error) {
       connectionError = error.toString();
       notifyListeners();
@@ -353,7 +406,7 @@ class AppModel extends ChangeNotifier {
         id: approval.id,
         result: _buildResult(approval, action),
       );
-      await refreshDashboard();
+      await refreshDashboard(refreshSkills: false);
       final session = dashboard.sessions.cast<SessionSummary?>().firstWhere(
         (item) => item?.id == approval.threadId,
         orElse: () => null,

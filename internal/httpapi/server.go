@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/api/v1/dashboard", s.handleDashboard)
 	s.mux.HandleFunc("/api/v1/events", s.handleEvents)
+	s.mux.HandleFunc("/api/v1/skills", s.handleSkills)
 	s.mux.HandleFunc("/api/v1/sessions", s.handleSessions)
 	s.mux.HandleFunc("/api/v1/sessions/", s.handleSessionByID)
 	s.mux.HandleFunc("/api/v1/approvals", s.handleApprovals)
@@ -61,6 +63,16 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.agent.Dashboard())
+}
+
+func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": s.agent.ListSkills(),
+	})
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +151,7 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
 
-		detail, err := s.agent.SessionDetail(ctx, sessionID)
+		detail, err := s.agent.SessionDetailPage(ctx, sessionID, parseSessionDetailPageRequest(r))
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err)
 			return
@@ -269,6 +281,25 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErrorMessage(w, http.StatusNotFound, fmt.Sprintf("unsupported session action %q", action))
 	}
+}
+
+func parseSessionDetailPageRequest(r *http.Request) runtime.SessionDetailPageRequest {
+	query := r.URL.Query()
+	return runtime.SessionDetailPageRequest{
+		TurnOffset: parseNonNegativeInt(query.Get("turnOffset")),
+		TurnLimit:  parseNonNegativeInt(query.Get("turnLimit")),
+	}
+}
+
+func parseNonNegativeInt(value string) int {
+	if strings.TrimSpace(value) == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return 0
+	}
+	return parsed
 }
 
 func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {

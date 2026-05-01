@@ -7,8 +7,9 @@ Map<String, dynamic> asMap(Object? value) {
     return value;
   }
   if (value is Map) {
-    return value
-        .map((key, dynamic innerValue) => MapEntry(key.toString(), innerValue));
+    return value.map(
+      (key, dynamic innerValue) => MapEntry(key.toString(), innerValue),
+    );
   }
   return <String, dynamic>{};
 }
@@ -65,11 +66,7 @@ DateTime parseDateTime(Object? value) {
 }
 
 class UploadedImageRef {
-  UploadedImageRef({
-    required this.id,
-    required this.name,
-    required this.size,
-  });
+  UploadedImageRef({required this.id, required this.name, required this.size});
 
   final String id;
   final String name;
@@ -104,17 +101,17 @@ class DashboardResponse {
   factory DashboardResponse.fromJson(Map<String, dynamic> json) {
     return DashboardResponse(
       agent: AgentSnapshot.fromJson(asMap(json['agent'])),
-      agents: asList(json['agents'])
-          .map((item) => AgentOption.fromJson(asMap(item)))
-          .toList(),
+      agents: asList(
+        json['agents'],
+      ).map((item) => AgentOption.fromJson(asMap(item))).toList(),
       defaultAgent: asString(json['defaultAgent'], 'codex'),
       stats: DashboardStats.fromJson(asMap(json['stats'])),
-      sessions: asList(json['sessions'])
-          .map((item) => SessionSummary.fromJson(asMap(item)))
-          .toList(),
-      approvals: asList(json['approvals'])
-          .map((item) => PendingRequestView.fromJson(asMap(item)))
-          .toList(),
+      sessions: asList(
+        json['sessions'],
+      ).map((item) => SessionSummary.fromJson(asMap(item))).toList(),
+      approvals: asList(
+        json['approvals'],
+      ).map((item) => PendingRequestView.fromJson(asMap(item))).toList(),
     );
   }
 
@@ -242,6 +239,28 @@ class AgentSnapshot {
   }
 }
 
+class AgentSkill {
+  AgentSkill({
+    required this.name,
+    required this.description,
+    required this.insertText,
+  });
+
+  final String name;
+  final String description;
+  final String insertText;
+
+  factory AgentSkill.fromJson(Map<String, dynamic> json) {
+    final name = asString(json['name']).trim();
+    final insertText = asString(json['insertText']).trim();
+    return AgentSkill(
+      name: name,
+      description: asString(json['description']).trim(),
+      insertText: insertText.isEmpty ? '\$$name ' : '$insertText ',
+    );
+  }
+}
+
 class DashboardStats {
   DashboardStats({
     required this.totalSessions,
@@ -292,6 +311,7 @@ class SessionSummary {
     required this.resumeAvailable,
     required this.resumeBlockedReason,
     required this.ended,
+    required this.userInitiated,
   });
 
   final String id;
@@ -319,6 +339,7 @@ class SessionSummary {
   final bool resumeAvailable;
   final String resumeBlockedReason;
   final bool ended;
+  final bool userInitiated;
 
   factory SessionSummary.fromJson(Map<String, dynamic> json) {
     return SessionSummary(
@@ -329,8 +350,9 @@ class SessionSummary {
       cwd: asString(json['cwd']),
       source: asString(json['source']),
       status: asString(json['status']),
-      activeFlags:
-          asList(json['activeFlags']).map((item) => asString(item)).toList(),
+      activeFlags: asList(
+        json['activeFlags'],
+      ).map((item) => asString(item)).toList(),
       loaded: asBool(json['loaded']),
       updatedAt: asInt(json['updatedAt']),
       createdAt: asInt(json['createdAt']),
@@ -348,6 +370,7 @@ class SessionSummary {
       resumeAvailable: asBool(json['resumeAvailable'], true),
       resumeBlockedReason: asString(json['resumeBlockedReason']),
       ended: asBool(json['ended']),
+      userInitiated: asBool(json['userInitiated'], true),
     );
   }
 
@@ -373,11 +396,9 @@ class SessionSummary {
 
   String get previewSummary => _normalizedPreview(preview);
 
-  String get previewExcerpt => _normalizedText(preview).headTailTruncated(
-        maxLength: 220,
-        head: 140,
-        tail: 72,
-      );
+  String get previewExcerpt => _normalizedText(
+    preview,
+  ).headTailTruncated(maxLength: 220, head: 140, tail: 72);
 
   String get updatedAtDisplay => formattedTimestamp(updatedAt);
 
@@ -404,13 +425,15 @@ class SessionSummary {
       return '未知';
     }
 
-    final date =
-        DateTime.fromMillisecondsSinceEpoch(timestamp * 1000).toLocal();
+    final date = DateTime.fromMillisecondsSinceEpoch(
+      timestamp * 1000,
+    ).toLocal();
     final now = DateTime.now();
     final sameDay =
         now.year == date.year && now.month == date.month && now.day == date.day;
     final yesterday = now.subtract(const Duration(days: 1));
-    final isYesterday = yesterday.year == date.year &&
+    final isYesterday =
+        yesterday.year == date.year &&
         yesterday.month == date.month &&
         yesterday.day == date.day;
 
@@ -482,17 +505,78 @@ class SessionDetail {
   SessionDetail({
     required this.summary,
     required this.turns,
-  });
+    SessionDetailPage? page,
+  }) : page = page ?? SessionDetailPage.forTurns(turns.length);
 
   final SessionSummary summary;
   final List<TurnDetail> turns;
+  final SessionDetailPage page;
 
   factory SessionDetail.fromJson(Map<String, dynamic> json) {
+    final turns = asList(
+      json['turns'],
+    ).map((item) => TurnDetail.fromJson(asMap(item))).toList();
     return SessionDetail(
       summary: SessionSummary.fromJson(asMap(json['summary'])),
-      turns: asList(json['turns'])
-          .map((item) => TurnDetail.fromJson(asMap(item)))
-          .toList(),
+      turns: turns,
+      page: SessionDetailPage.fromJson(asMap(json['page']), turns.length),
+    );
+  }
+
+  SessionDetail mergeEarlier(SessionDetail earlier) {
+    final seenTurnIds = turns.map((turn) => turn.id).toSet();
+    final earlierTurns = earlier.turns
+        .where((turn) => !seenTurnIds.contains(turn.id))
+        .toList();
+    final mergedTurns = <TurnDetail>[...earlierTurns, ...turns];
+    final totalTurns = math.max(page.totalTurns, earlier.page.totalTurns);
+    return SessionDetail(
+      summary: summary,
+      turns: mergedTurns,
+      page: SessionDetailPage(
+        turnOffset: 0,
+        turnLimit: mergedTurns.length,
+        totalTurns: totalTurns,
+        hasMoreBefore: earlier.page.hasMoreBefore,
+      ),
+    );
+  }
+}
+
+class SessionDetailPage {
+  const SessionDetailPage({
+    required this.turnOffset,
+    required this.turnLimit,
+    required this.totalTurns,
+    required this.hasMoreBefore,
+  });
+
+  final int turnOffset;
+  final int turnLimit;
+  final int totalTurns;
+  final bool hasMoreBefore;
+
+  factory SessionDetailPage.fromJson(
+    Map<String, dynamic> json,
+    int fallbackTurnCount,
+  ) {
+    if (json.isEmpty) {
+      return SessionDetailPage.forTurns(fallbackTurnCount);
+    }
+    return SessionDetailPage(
+      turnOffset: asInt(json['turnOffset']),
+      turnLimit: asInt(json['turnLimit'], fallbackTurnCount),
+      totalTurns: asInt(json['totalTurns'], fallbackTurnCount),
+      hasMoreBefore: asBool(json['hasMoreBefore']),
+    );
+  }
+
+  factory SessionDetailPage.forTurns(int turnCount) {
+    return SessionDetailPage(
+      turnOffset: 0,
+      turnLimit: turnCount,
+      totalTurns: turnCount,
+      hasMoreBefore: false,
     );
   }
 }
@@ -532,21 +616,18 @@ class TurnDetail {
       error: asString(json['error']),
       diff: asString(json['diff']),
       planExplanation: asString(json['planExplanation']),
-      plan: asList(json['plan'])
-          .map((item) => PlanStep.fromJson(asMap(item)))
-          .toList(),
-      items: asList(json['items'])
-          .map((item) => TurnItem.fromJson(asMap(item)))
-          .toList(),
+      plan: asList(
+        json['plan'],
+      ).map((item) => PlanStep.fromJson(asMap(item))).toList(),
+      items: asList(
+        json['items'],
+      ).map((item) => TurnItem.fromJson(asMap(item))).toList(),
     );
   }
 }
 
 class PlanStep {
-  PlanStep({
-    required this.step,
-    required this.status,
-  });
+  PlanStep({required this.step, required this.status});
 
   final String step;
   final String status;
@@ -586,8 +667,9 @@ class TurnItem {
       body: asString(json['body']),
       status: asString(json['status']),
       auxiliary: asString(json['auxiliary']),
-      metadata: asMap(json['metadata'])
-          .map((key, dynamic value) => MapEntry(key, asString(value))),
+      metadata: asMap(
+        json['metadata'],
+      ).map((key, dynamic value) => MapEntry(key, asString(value))),
     );
   }
 }
@@ -649,10 +731,7 @@ class ApprovalQuestion {
 }
 
 class ApprovalQuestionOption {
-  ApprovalQuestionOption({
-    required this.label,
-    required this.description,
-  });
+  ApprovalQuestionOption({required this.label, required this.description});
 
   final String label;
   final String description;
