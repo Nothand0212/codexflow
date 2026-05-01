@@ -15,7 +15,6 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private var channel: MethodChannel? = null
     private var pendingNotificationRoute: String? = null
-    private var monitorRunning = false
     private var pendingPermissionResult: MethodChannel.Result? = null
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
@@ -41,7 +40,7 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
                 "agentUrlChanged" -> {
-                    if (monitorRunning) {
+                    if (CodexFlowMonitorService.isServiceMarkedRunning(this)) {
                         startMonitor()
                     }
                     result.success(null)
@@ -68,7 +67,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun startMonitor() {
-        monitorRunning = true
+        CodexFlowMonitorService.markServiceRunning(this, true)
         val intent = Intent(this, CodexFlowMonitorService::class.java)
             .setAction(CodexFlowMonitorService.ACTION_START)
         ContextCompat.startForegroundService(this, intent)
@@ -78,11 +77,11 @@ class MainActivity : FlutterActivity() {
         val intent = Intent(this, CodexFlowMonitorService::class.java)
             .setAction(CodexFlowMonitorService.ACTION_STOP)
         ContextCompat.startForegroundService(this, intent)
-        monitorRunning = false
+        CodexFlowMonitorService.markServiceRunning(this, false)
     }
 
     private fun setAppVisible(visible: Boolean) {
-        if (!monitorRunning) return
+        if (!CodexFlowMonitorService.isServiceMarkedRunning(this)) return
         val intent = Intent(this, CodexFlowMonitorService::class.java)
             .setAction(CodexFlowMonitorService.ACTION_SET_VISIBILITY)
             .putExtra(CodexFlowMonitorService.EXTRA_VISIBLE, visible)
@@ -127,7 +126,7 @@ class MainActivity : FlutterActivity() {
     private fun monitorStatus(): Map<String, Any> {
         return mapOf(
             "supported" to true,
-            "running" to monitorRunning,
+            "running" to CodexFlowMonitorService.isServiceMarkedRunning(this),
             "notificationPermissionGranted" to hasNotificationPermission(),
             "versionName" to packageVersionName(),
             "buildNumber" to packageVersionCode(),

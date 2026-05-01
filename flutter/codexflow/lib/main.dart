@@ -4,9 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'models/app_models.dart';
+import 'navigation/notification_target.dart';
 import 'screens/approval_screen.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/session_detail_screen.dart';
 import 'state/app_model.dart';
 import 'theme/palette.dart';
 import 'widgets/common.dart';
@@ -68,6 +71,8 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   int _index = 0;
   Timer? _timer;
+  AppModel? _model;
+  int _handledNotificationRouteVersion = 0;
 
   static const _pages = <Widget>[
     DashboardScreen(),
@@ -81,7 +86,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final model = context.read<AppModel>();
-      model.setNotificationRouteHandler(_handleNotificationRoute);
+      model.setNotificationRouteHandler(model.applyNotificationTarget);
       unawaited(model.startMonitorIfAllowed());
       unawaited(_takeInitialNotificationRoute(model));
       _timer = Timer.periodic(const Duration(seconds: 8), (_) {
@@ -94,8 +99,21 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final nextModel = context.read<AppModel>();
+    if (_model == nextModel) {
+      return;
+    }
+    _model?.removeListener(_handleAppModelChanged);
+    _model = nextModel;
+    nextModel.addListener(_handleAppModelChanged);
+  }
+
+  @override
   void dispose() {
     _timer?.cancel();
+    _model?.removeListener(_handleAppModelChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -107,21 +125,101 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   Future<void> _takeInitialNotificationRoute(AppModel model) async {
-    final route = await model.takeInitialNotificationRoute();
-    if (!mounted || route == null || route.isEmpty) {
+    final target = await model.takeInitialNotificationRoute();
+    if (!mounted || target == null) {
       return;
     }
-    _handleNotificationRoute(route);
+    model.applyNotificationTarget(target);
   }
 
-  void _handleNotificationRoute(String route) {
+  void _handleAppModelChanged() {
+    final model = _model;
+    if (model == null ||
+        model.notificationRouteVersion == _handledNotificationRouteVersion) {
+      return;
+    }
+    _handledNotificationRouteVersion = model.notificationRouteVersion;
+    unawaited(_applyNotificationTarget(model.pendingNotificationTarget));
+  }
+
+  Future<void> _applyNotificationTarget(NotificationTarget target) async {
+    switch (target.target) {
+      case NotificationTargetKind.dashboard:
+        _showTab(0);
+      case NotificationTargetKind.approvals:
+        await _openApprovalsTarget(target);
+      case NotificationTargetKind.sessionDetail:
+        await _openSessionDetailTarget(target);
+    }
+  }
+
+  void _showTab(int index) {
     if (!mounted) {
       return;
     }
-    final normalized = route.toLowerCase();
     setState(() {
-      _index = normalized.contains('approval') ? 1 : 0;
+      _index = index;
     });
+  }
+
+  Future<void> _openApprovalsTarget(NotificationTarget target) async {
+    _showTab(1);
+    final model = context.read<AppModel>();
+    await model.refreshDashboard();
+    if (!mounted) {
+      return;
+    }
+    final session = _findSession(model, target.sessionId);
+    if (session != null) {
+      model.setSelectedStartAgent(session.agentId);
+    }
+    if (target.approvalId.isNotEmpty) {
+      final exists = model.dashboard.approvals.any(
+        (approval) => approval.id == target.approvalId,
+      );
+      if (!exists) {
+        model.showNotice('这条审批可能已经处理。');
+      }
+    }
+  }
+
+  Future<void> _openSessionDetailTarget(NotificationTarget target) async {
+    _showTab(0);
+    final sessionId = target.sessionId;
+    if (sessionId.isEmpty) {
+      context.read<AppModel>().showNotice('通知缺少会话信息。', isError: true);
+      return;
+    }
+    final model = context.read<AppModel>();
+    await model.refreshDashboard();
+    if (!mounted) {
+      return;
+    }
+    final session = _findSession(model, sessionId);
+    if (session == null) {
+      model.showNotice('这个会话当前不可用，可能已经被清理。', isError: true);
+      return;
+    }
+    model.setSelectedStartAgent(session.agentId);
+    await model.loadSession(sessionId);
+    if (!mounted) {
+      return;
+    }
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => SessionDetailScreen(sessionId: sessionId),
+      ),
+    );
+  }
+
+  SessionSummary? _findSession(AppModel model, String sessionId) {
+    if (sessionId.isEmpty) {
+      return null;
+    }
+    return model.dashboard.sessions.cast<SessionSummary?>().firstWhere(
+      (session) => session?.id == sessionId,
+      orElse: () => null,
+    );
   }
 
   @override

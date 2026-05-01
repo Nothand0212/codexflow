@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/app_models.dart';
+import '../navigation/notification_target.dart';
 import '../services/api_client.dart';
 import '../services/android_monitor_bridge.dart';
 
@@ -68,6 +69,8 @@ class AppModel extends ChangeNotifier {
   bool operationNoticeIsError = false;
   String composerDraft = '';
   String selectedStartAgentId = 'codex';
+  NotificationTarget pendingNotificationTarget = NotificationTarget.dashboard();
+  int notificationRouteVersion = 0;
   int _consecutiveDashboardFailures = 0;
   Timer? _noticeTimer;
 
@@ -146,8 +149,14 @@ class AppModel extends ChangeNotifier {
     _monitorBridge.setNotificationRouteHandler(handler);
   }
 
-  Future<String?> takeInitialNotificationRoute() {
+  Future<NotificationTarget?> takeInitialNotificationRoute() {
     return _monitorBridge.takeInitialNotificationRoute();
+  }
+
+  void applyNotificationTarget(NotificationTarget target) {
+    pendingNotificationTarget = target;
+    notificationRouteVersion += 1;
+    notifyListeners();
   }
 
   Future<void> refreshDashboard() async {

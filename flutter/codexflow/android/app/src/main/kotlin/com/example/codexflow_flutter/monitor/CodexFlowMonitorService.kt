@@ -59,6 +59,7 @@ class CodexFlowMonitorService : Service() {
     override fun onDestroy() {
         running = false
         runGeneration += 1
+        markServiceRunning(this, false)
         workerHandler?.removeCallbacksAndMessages(null)
         workerThread?.quitSafely()
         workerHandler = null
@@ -84,6 +85,7 @@ class CodexFlowMonitorService : Service() {
             workerThread = HandlerThread("CodexFlowMonitor").also { it.start() }
             workerHandler = Handler(workerThread!!.looper)
         }
+        markServiceRunning(this, true)
         if (running) return
         running = true
         runGeneration += 1
@@ -133,6 +135,7 @@ class CodexFlowMonitorService : Service() {
         running = false
         runGeneration += 1
         workerHandler?.removeCallbacksAndMessages(null)
+        markServiceRunning(this, false)
         val url = readBaseUrl()
         snapshotStore.markManuallyStopped(url)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -212,6 +215,20 @@ class CodexFlowMonitorService : Service() {
         const val ACTION_SET_VISIBILITY = "com.example.codexflow_flutter.monitor.SET_VISIBILITY"
         const val EXTRA_VISIBLE = "visible"
 
+        fun markServiceRunning(context: Context, running: Boolean): Boolean {
+            return context.getSharedPreferences(RUNTIME_PREFERENCES_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_SERVICE_RUNNING, running)
+                .commit()
+        }
+
+        fun isServiceMarkedRunning(context: Context): Boolean {
+            return context.getSharedPreferences(RUNTIME_PREFERENCES_NAME, Context.MODE_PRIVATE)
+                .getBoolean(KEY_SERVICE_RUNNING, false)
+        }
+
+        private const val RUNTIME_PREFERENCES_NAME = "codexflow_monitor_runtime"
+        private const val KEY_SERVICE_RUNNING = "codexflow.monitor.serviceRunning"
         private const val KEY_BASE_URL = "codexflow.baseURL"
         private const val DEFAULT_BASE_URL = "http://127.0.0.1:4318"
         private const val SUCCESS_VISIBLE_MS = 10_000L

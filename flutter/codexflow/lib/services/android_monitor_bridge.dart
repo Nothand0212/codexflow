@@ -2,7 +2,9 @@ import 'dart:async';
 
 import 'package:flutter/services.dart';
 
-typedef NotificationRouteHandler = void Function(String route);
+import '../navigation/notification_target.dart';
+
+typedef NotificationRouteHandler = void Function(NotificationTarget target);
 
 abstract class AndroidMonitorBridgeApi {
   Future<void> start();
@@ -12,7 +14,7 @@ abstract class AndroidMonitorBridgeApi {
   Future<bool> requestNotificationPermission();
   Future<AndroidMonitorStatus> getStatus();
   void setNotificationRouteHandler(NotificationRouteHandler? handler);
-  Future<String?> takeInitialNotificationRoute();
+  Future<NotificationTarget?> takeInitialNotificationRoute();
 }
 
 class AndroidMonitorStatus {
@@ -133,11 +135,15 @@ class AndroidMonitorBridge implements AndroidMonitorBridgeApi {
   }
 
   @override
-  Future<String?> takeInitialNotificationRoute() async {
-    return _withMissingPluginDefault<String?>(
+  Future<NotificationTarget?> takeInitialNotificationRoute() async {
+    final route = await _withMissingPluginDefault<String?>(
       _channel.invokeMethod<String>('takeInitialNotificationRoute'),
       null,
     );
+    if (route == null || route.isEmpty) {
+      return null;
+    }
+    return NotificationTarget.fromJsonString(route);
   }
 
   Future<void> _handleNativeCall(MethodCall call) async {
@@ -145,7 +151,9 @@ class AndroidMonitorBridge implements AndroidMonitorBridgeApi {
       case 'notificationRoute':
         final route = call.arguments?.toString();
         if (route != null && route.isNotEmpty) {
-          _notificationRouteHandler?.call(route);
+          _notificationRouteHandler?.call(
+            NotificationTarget.fromJsonString(route),
+          );
         }
         return;
       default:
