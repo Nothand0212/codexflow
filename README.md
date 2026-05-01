@@ -80,10 +80,13 @@ Client Apps
 ### Flutter App
 
 - 复用同一套 Agent HTTP API
-- 会话总览页
-- 会话详情页
+- Android 优先的会话总览页：只保留 `总会话 / 已加载 / 运行中` 三个入口
+- 二级会话浏览页：按最后更新时间排序，展示完整工作目录，并支持关键词搜索
+- 聊天式会话详情页：使用类似微信 / WhatsApp 的气泡流，默认定位到最新消息
 - 审批中心
 - 设置页 / Agent 地址配置
+- 图片上传与 Skills 插入放在同一条输入工具栏
+- 启动和刷新时读取本机 Codex CLI 可用的 agent skills，并支持按名称搜索
 - Claude 会话显示 `History / Runtime` 与 `现有 Runtime / 历史新开 / 新建 Runtime` 状态
 - Android / Web / 桌面端 runner 已补齐
 - 已适配浏览器跨域访问本地 Agent
@@ -97,10 +100,10 @@ Client Apps
 
 ## 当前已验证可用的端
 
-- `Go Agent`（macOS）
+- `Go Agent`（Linux / macOS）
 - `iOS SwiftUI App`
 - `Flutter Web (Chrome)`
-- `Flutter Android`（MuMu 模拟器）
+- `Flutter Android`（Android 真机 / 模拟器）
 
 ## 发布产物
 
@@ -117,13 +120,17 @@ Client Apps
 - Claude 会话生命周期已经拆分为 `managed / runtime_available / history_only / ended`
 - iOS 客户端可以消费真实数据并进行操作
 - Flutter Web 客户端可以通过浏览器访问本地 Agent
-- Flutter Android 客户端可以在模拟器中访问局域网 Agent
+- Flutter Android 客户端可以通过局域网或 Tailscale 访问电脑端 Agent
 
 最近这次更新主要包括：
 
-- Claude 会话分层：把 `历史导入` 和 `可接管 runtime` 正式拆开
-- 新建 / 接管 / 结束会话统一进入明确的生命周期阶段
-- Agent 三端打包、Flutter Web / Android 打包、iOS `unsigned ipa` 导出流程验证
+- Android 首页改为轻量入口页，只显示 `总会话 / 已加载 / 运行中`，点击后进入二级会话列表
+- 会话列表按最后更新时间排序，保留完整工作目录路径，并支持搜索会话名、路径、分支、来源和预览文本
+- 聊天窗口改为移动 IM 风格：用户和 Agent 使用左右气泡，默认只展示最终回复，隐藏推理和执行细节
+- 聊天记录改为按需加载旧消息，进入会话默认滚动到最新内容，降低长历史会话的卡顿
+- Skills 面板改为动态读取 Codex CLI 本机 skills，按字母排序，并在面板顶部提供搜索框
+- 图片上传和 Skills 入口合并到同一条输入工具栏，适合单手操作
+- Android 前台常驻通知显示更多 Agent 状态信息，便于确认后台监控是否仍在工作
 
 当前还没有做的部分：
 
@@ -131,7 +138,7 @@ Client Apps
 - 登录与设备配对
 - APNs 推送
 - macOS 菜单栏 Launcher
-- 自动审批策略引擎
+- 更细粒度的自动审批策略引擎
 - 完整的 SSE 实时刷新体验
 
 ## 快速开始
@@ -163,6 +170,7 @@ go run ./cmd/codexflow-agent
 
 - `CODEXFLOW_LISTEN_ADDR`
 - `CODEXFLOW_CODEX_PATH`
+- `CODEXFLOW_CODEX_AUTO_APPROVE`
 - `CODEXFLOW_REFRESH_INTERVAL`
 - `CODEXFLOW_STATE_DB_PATH`
 
@@ -365,13 +373,13 @@ http://192.168.1.10:4318
 
 ## 基本使用方式
 
-1. 打开 `会话` 页面，查看当前真实会话。
-2. 对历史会话点击“接管到 CodexFlow”，将其转为受控会话。
-3. 在受控会话详情页查看 plan、diff、timeline。
-4. 在受控会话详情页发送下一轮 prompt，或 steer 当前执行中的 turn。
-5. 对正在执行的 turn，可以直接 interrupt。
-6. 打开 `Approvals` 页面，处理等待中的审批请求。
-7. 对不再需要的会话，可以结束或归档。
+1. 打开 Android App 首页，选择 `总会话`、`已加载` 或 `运行中`。
+2. 在二级会话列表里通过关键词搜索目标会话；列表默认按最后更新时间倒序排列。
+3. 对历史会话点击“接管到 CodexFlow”，将其转为受控会话。
+4. 在聊天页用气泡流查看上下文；默认只展示最终回复，推理和执行细节不会占据聊天窗口。
+5. 在输入栏发送下一轮 prompt，或在当前 turn 运行中时继续 steer。
+6. 点击 `Skills` 搜索并插入本机 Codex CLI 可用的 agent skill；也可以在同一栏添加图片。
+7. 打开 `Approvals` 页面，处理等待中的审批请求；对不再需要的会话可以结束或归档。
 
 补充说明：
 
@@ -394,6 +402,7 @@ http://192.168.1.10:4318
 - `POST /api/v1/sessions/:id/turns/start`
 - `POST /api/v1/sessions/:id/turns/steer`
 - `POST /api/v1/sessions/:id/turns/interrupt`
+- `GET /api/v1/skills`
 - `GET /api/v1/approvals`
 - `POST /api/v1/approvals/:id/resolve`
 - `GET /api/v1/events`
@@ -409,60 +418,21 @@ internal/store            本地状态存储
 ios/CodexFlow             iOS SwiftUI 客户端
 flutter/codexflow         Flutter 跨平台客户端
 docs                      架构与路线文档
-assets                    README 截图资源
+imgs                      README Android 截图资源
 ```
 
 ## 截图
-
-### iOS
-
-<table>
-  <tr>
-    <td><img src="assets/screenshot-01.jpeg" alt="Screenshot 01" width="240"></td>
-    <td><img src="assets/screenshot-02.jpeg" alt="Screenshot 02" width="240"></td>
-  </tr>
-  <tr>
-    <td><img src="assets/screenshot-03.jpeg" alt="Screenshot 03" width="240"></td>
-    <td><img src="assets/screenshot-04.jpeg" alt="Screenshot 04" width="240"></td>
-  </tr>
-  <tr>
-    <td><img src="assets/screenshot-05.jpeg" alt="Screenshot 05" width="240"></td>
-    <td><img src="assets/screenshot-06.jpeg" alt="Screenshot 06" width="240"></td>
-  </tr>
-  <tr>
-    <td><img src="assets/screenshot-07.jpeg" alt="Screenshot 07" width="240"></td>
-    <td><img src="assets/screenshot-08.jpeg" alt="Screenshot 08" width="240"></td>
-  </tr>
-  <tr>
-    <td><img src="assets/screenshot-09.jpeg" alt="Screenshot 09" width="240"></td>
-    <td></td>
-  </tr>
-</table>
-
-### Claude
-
-<table>
-  <tr>
-    <td><img src="assets/screenshot_claude_01.jpeg" alt="Claude Screenshot 01" width="240"></td>
-    <td><img src="assets/screenshot_claude_02.jpeg" alt="Claude Screenshot 02" width="240"></td>
-  </tr>
-</table>
 
 ### Android
 
 <table>
   <tr>
-    <td><img src="assets/screenshot_android_01.png" alt="Android Screenshot 01" width="240"></td>
-    <td><img src="assets/screenshot_android_02.png" alt="Android Screenshot 02" width="240"></td>
+    <td align="center"><img src="imgs/android-session-overview.jpg" alt="Android session overview" width="220"><br><sub>首页入口：总会话 / 已加载 / 运行中</sub></td>
+    <td align="center"><img src="imgs/android-session-search.jpg" alt="Android session search" width="220"><br><sub>二级会话列表：按更新时间排序并支持搜索</sub></td>
   </tr>
-</table>
-
-### Web
-
-<table>
   <tr>
-    <td><img src="assets/screenshot_web_01.png" alt="Web Screenshot 01" width="240"></td>
-    <td><img src="assets/screenshot_web_02.png" alt="Web Screenshot 02" width="240"></td>
+    <td align="center"><img src="imgs/android-chat-timeline.jpg" alt="Android chat timeline" width="220"><br><sub>聊天页：气泡式消息流，默认展示最终回复</sub></td>
+    <td align="center"><img src="imgs/android-skills-search.jpg" alt="Android skills search" width="220"><br><sub>Skills 面板：动态读取、字母排序、顶部搜索</sub></td>
   </tr>
 </table>
 
@@ -474,4 +444,4 @@ assets                    README 截图资源
 - macOS Launcher
 - 局域网外的安全 relay
 - 推送通知
-- 自动审批策略
+- 更细粒度的自动审批策略
