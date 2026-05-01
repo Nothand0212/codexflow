@@ -165,11 +165,8 @@ class MainActivity : FlutterActivity() {
         if (route.isNullOrEmpty()) {
             return
         }
-        if (channel == null) {
-            pendingNotificationRoute = route
-        } else {
-            channel?.invokeMethod("notificationRoute", route)
-        }
+        pendingNotificationRoute = route
+        channel?.invokeMethod("notificationRoute", route)
     }
 
     companion object {
