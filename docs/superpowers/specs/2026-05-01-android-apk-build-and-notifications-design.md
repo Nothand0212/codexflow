@@ -10,6 +10,8 @@ Second revision clarifies approval-to-session mapping, snapshot persistence form
 
 Third revision clarifies foreground/background visibility signaling, poll-based missed-event limits, batch notification copy, synchronous snapshot writes, APK metadata path, Web download link updates, pending-count precedence, and notification permission timing.
 
+Fourth revision clarifies notification tap routing for cold and warm starts, foreground service startup timing, notification permission behavior for foreground-service notifications, turn result key formatting, manual restart baseline semantics, snapshot version handling, and batch turn-result navigation.
+
 ## Context
 
 CodexFlow lets a mobile client control and monitor a local Codex CLI runtime through the Go Agent. The user is currently using CodexFlow through Tailscale from Android and Web.
@@ -237,6 +239,15 @@ The service owns:
 - detecting managed turn completion/interruption events
 - sending alert notifications through the correct notification channel
 
+The service must call `startForeground()` immediately when it starts, before network calls or other slow initialization. On Android 12+, a service started with `startForegroundService()` must enter foreground quickly or the app can crash. The first persistent notification can show a provisional state such as:
+
+```text
+CodexFlow starting · pending --
+Loading Agent status
+```
+
+After the foreground notification is posted, the service can load SharedPreferences, parse the persisted snapshot, create the HTTP client, and start polling.
+
 The Flutter UI should remain responsible for:
 
 - dashboard display
@@ -358,6 +369,7 @@ Use synchronous SharedPreferences writes for the snapshot. On Android native cod
 The JSON object should be keyed by Agent URL. Each URL entry contains:
 
 - initialized/baselined state
+- manually stopped flag
 - last used timestamp
 - seen approval ids with first-observed timestamps
 - last observed managed turn status by `session.id + lastTurnId`, with first-observed timestamps for terminal result keys
@@ -373,6 +385,7 @@ Shape:
   "urls": {
     "http://100.91.5.116:4318": {
       "initialized": true,
+      "manuallyStopped": false,
       "lastUsedAt": 1777615200,
       "lastSuccessAt": 1777615200,
       "seenApprovals": {
@@ -390,18 +403,25 @@ Shape:
 
 On service start:
 
+- if monitoring is re-enabled after the user manually stopped it, clear the manual-stopped flag and treat the first successful dashboard response as a fresh baseline without alerting
 - if a persisted snapshot exists for the current Agent URL, compare the first successful dashboard response against it and notify for new eligible events
 - if no persisted snapshot exists for the current Agent URL, the first successful dashboard response becomes the baseline and emits no alert notifications
 
 This prevents system-kill-and-restart cycles from swallowing events that happened while the service was down.
+
+Manual stop is different from process death. When the user explicitly stops monitoring, CodexFlow accepts that events during the stopped period are not monitored and should not be backfilled as alerts when monitoring is turned on again.
+
+If the persisted snapshot JSON `version` is missing or unsupported, discard the snapshot and treat the next successful dashboard response as the first baseline.
 
 Manual action alerts are deduplicated by `approval.id`.
 
 Turn result alerts are deduplicated by:
 
 ```text
-session.id + lastTurnId + lastTurnStatus
+turnResultKey = session.id + ":" + lastTurnId + ":" + lastTurnStatus
 ```
+
+Use `:` as the separator in persisted snapshots and tests.
 
 Only these statuses produce turn result alerts:
 
@@ -470,7 +490,9 @@ Persistent notification payload:
 
 The app should introduce a navigation target abstraction so notifications can switch the bottom tab and open session detail after startup.
 
-Cold-start routing must not depend on a successful dashboard fetch before showing UI:
+Notification tap routing applies to both cold-start and warm-start cases. The Android activity must use `singleTop` or an equivalent launch mode / intent handling strategy so tapping a notification does not create duplicate app instances.
+
+Tap routing must not depend on a successful dashboard fetch before showing UI:
 
 1. Start the app shell.
 2. Apply the notification target immediately.
@@ -478,6 +500,8 @@ Cold-start routing must not depend on a successful dashboard fetch before showin
 4. If dashboard/session loading fails, keep the user on the target screen and show the existing connection error state.
 5. If the target approval no longer exists, show the approval list with a short in-app notice.
 6. If the target session cannot be loaded, show the dashboard with a short in-app notice.
+
+Warm-start taps use the same rules. If the app is already open and the approval was resolved from Web or the session ended before the tap is handled, the app should apply the same fallback behavior instead of doing nothing.
 
 ### Notification Identity and Batching
 
@@ -500,6 +524,8 @@ If exactly one new manual action is detected, notification id `2000` targets tha
 
 If exactly one new turn result is detected, notification id `3000` targets that session detail. If multiple turn results are detected in the same poll, notification id `3000` summarizes the count and opens the dashboard.
 
+Exception: if multiple turn results are detected in the same poll and all belong to the same `session.id`, notification id `3000` should still open that session detail.
+
 Updating notification id `2000` or `3000` for newly detected events must alert again with sound/vibration. The implementation should explicitly disable "only alert once" behavior for alert notifications. For Android APIs or notification libraries that expose this directly, use `setOnlyAlertOnce(false)` or the equivalent.
 
 Repeated polls for the same approval id or same `session.id + lastTurnId + lastTurnStatus` must update state without re-alerting.
@@ -520,6 +546,8 @@ Permission request timing:
 - Request it when the user first enables or starts background monitoring, after the Agent URL is configured.
 - If monitoring starts automatically after app launch and permission has never been requested, show an in-app prompt explaining that CodexFlow needs notification permission for manual action and turn result alerts; the prompt action triggers the Android permission request.
 - If permission is denied, continue monitoring and keep the settings warning visible.
+
+On Android 13+, the foreground service persistent notification can still be shown in the system's foreground service surfaces even when `POST_NOTIFICATIONS` is denied. The implementation must not skip `startForeground()` because alert-notification permission is missing. `POST_NOTIFICATIONS` controls alert visibility, not whether the foreground service enters foreground state.
 
 ### Flutter and Native Boundary
 
@@ -568,9 +596,11 @@ Stopping monitoring means:
 - stop dashboard polling
 - stop the Android foreground service
 - remove the persistent status notification
-- keep the persisted snapshot so monitoring can resume without losing deduplication state
+- keep the persisted snapshot but mark the current Agent URL as manually stopped
 
 When monitoring is stopped, Android may reclaim the app process more aggressively. This is acceptable for this version. The next app launch should be treated as a normal cold start.
+
+When the user manually re-enables monitoring, the first successful dashboard response becomes a fresh baseline and must not emit alerts for events that accumulated while monitoring was stopped.
 
 This version does not auto-start monitoring after device reboot.
 
@@ -650,11 +680,15 @@ Add tests for:
 - Flutter lifecycle changes notify the monitor of visible/background state through the method-channel boundary.
 - network failures and 15 second HTTP timeouts use 30/60/120 second backoff, and success resets the interval.
 - foreground/background app visibility changes switch between 10 second and 30 second success intervals.
-- stopping monitoring stops polling, stops the foreground service, and removes the persistent notification.
+- stopping monitoring stops polling, stops the foreground service, removes the persistent notification, and marks the current URL as manually stopped.
+- manually re-enabling monitoring creates a fresh baseline and does not backfill alerts from the stopped period.
+- unsupported snapshot versions are discarded and treated as first-start baseline.
 - notification permission denied state is surfaced without crashing monitoring.
-- notification tap routing handles cold start, dashboard load failure, missing approval, and missing session.
+- notification tap routing handles cold start, warm start, dashboard load failure, missing approval, and missing session.
 - notification id and batching logic emits at most one manual action alert and one turn result alert per poll.
+- turn result deduplication key uses `session.id + ":" + lastTurnId + ":" + lastTurnStatus`.
 - batch notification text is deterministic for multiple manual actions and multiple turn results.
+- multiple turn results in one poll route to session detail when all results belong to the same session; otherwise route to dashboard.
 - new events that update alert notification ids `2000` or `3000` re-alert rather than silently updating.
 
 ### Go Tests
@@ -679,6 +713,7 @@ Then verify:
 - APK manifest contains network, notification, and foreground service permissions
 - APK manifest declares foreground service type `specialUse` and does not declare the monitoring service as `dataSync`
 - APK packaged or merged manifest contains `android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE`
+- main activity launch mode prevents duplicate app instances on notification taps, for example `singleTop`
 - release shrinking does not remove foreground service, notification receiver, or method-channel entrypoints
 - APK installs on the Android device
 - Android app can connect to `http://100.91.5.116:4318`
