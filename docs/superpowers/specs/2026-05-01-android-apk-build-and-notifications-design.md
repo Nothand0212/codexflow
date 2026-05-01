@@ -12,6 +12,8 @@ Third revision clarifies foreground/background visibility signaling, poll-based 
 
 Fourth revision clarifies notification tap routing for cold and warm starts, foreground service startup timing, notification permission behavior for foreground-service notifications, turn result key formatting, manual restart baseline semantics, snapshot version handling, and batch turn-result navigation.
 
+Fifth revision adds release signing strategy, final-turn notification handling when a session leaves `managed`, manual-stop persistence ordering, metadata generation requirements, empty-dashboard behavior, and rollout command requirements.
+
 ## Context
 
 CodexFlow lets a mobile client control and monitor a local Codex CLI runtime through the Go Agent. The user is currently using CodexFlow through Tailscale from Android and Web.
@@ -227,6 +229,39 @@ If the Web UI or static `index.html` has a hard-coded Android APK download link,
 
 The existing hot-patched APK should not be treated as the source of truth once a rebuilt APK exists.
 
+### APK Signing
+
+Release APKs must not use the debug signing key.
+
+Create a dedicated CodexFlow release keystore on the build machine:
+
+```text
+/home/lin/.local/share/codexflow-keys/release.jks
+```
+
+Create `flutter/codexflow/android/key.properties` with:
+
+```properties
+storeFile=/home/lin/.local/share/codexflow-keys/release.jks
+storePassword=<local secret>
+keyAlias=codexflow
+keyPassword=<local secret>
+```
+
+The Android Gradle config should load `key.properties` and use that signing config for `release`.
+
+First rollout creates the keystore. Later rollouts must reuse the same keystore so Android accepts APK updates without uninstalling the app.
+
+The keystore and signing property files must not be committed. Add these ignore rules if they are not already present:
+
+```gitignore
+flutter/codexflow/android/key.properties
+*.jks
+*.keystore
+```
+
+If the release keystore is lost, existing installations signed with the old key cannot be upgraded in place. The user would have to uninstall and reinstall, losing app-local settings.
+
 ### Android Monitoring Service
 
 The Android app should add an Android foreground service responsible for mobile background monitoring.
@@ -339,10 +374,19 @@ On every poll:
    - pending manual action count from the filtered approvals
    - approval ids from the filtered approvals
    - last turn id/status by managed session
-6. Update the persistent status notification.
-7. Compare current state with the previous snapshot.
-8. Emit alert notifications only for new eligible transitions.
-9. Store the current snapshot as the next baseline.
+6. Check sessions that existed as managed sessions in the previous snapshot but are no longer managed in the current dashboard. If the current dashboard still contains one of those sessions in `ended`, `history_only`, `discovered`, or `runtime_available` and its `lastTurnStatus` has newly become `completed` or `interrupted`, emit the turn result alert once.
+7. Update the persistent status notification.
+8. Compare current state with the previous snapshot.
+9. Emit alert notifications only for new eligible transitions.
+10. Store the current snapshot as the next baseline.
+
+If the dashboard response is valid and contains empty `sessions` and `approvals`, treat it as an online empty state:
+
+- persistent notification shows online, running 0, pending 0
+- no alerts are emitted
+- existing seen approval/turn keys are retained
+
+If the Agent restarts and sessions temporarily disappear, this must not cause duplicate notifications when those sessions reappear.
 
 If the Agent cannot be reached:
 
@@ -376,6 +420,7 @@ The JSON object should be keyed by Agent URL. Each URL entry contains:
 - last successful dashboard timestamp
 - last known running managed session count
 - last known pending manual action count
+- previously managed session turn state, keyed by `session.id`
 
 Shape:
 
@@ -393,6 +438,12 @@ Shape:
       },
       "seenTurnResults": {
         "019-session:019-turn:completed": 1777615200
+      },
+      "managedTurnState": {
+        "019-session": {
+          "lastTurnId": "019-turn",
+          "lastTurnStatus": "inProgress"
+        }
       },
       "lastRunningManagedCount": 1,
       "lastPendingManualActionCount": 0
@@ -593,10 +644,13 @@ The first version starts monitoring automatically after the app launches, and th
 
 Stopping monitoring means:
 
+- Flutter UI synchronously writes `manuallyStopped = true` for the current Agent URL snapshot before stopping the service
 - stop dashboard polling
 - stop the Android foreground service
 - remove the persistent status notification
 - keep the persisted snapshot but mark the current Agent URL as manually stopped
+
+The manual-stop marker must be written by the UI before asking the service to stop. Do not rely on service `onDestroy()` for this marker, because process death or service-stop races can skip `onDestroy()`.
 
 When monitoring is stopped, Android may reclaim the app process more aggressively. This is acceptable for this version. The next app launch should be treated as a normal cold start.
 
@@ -666,6 +720,8 @@ Add tests for:
 - `discovered` sessions are included in the history group.
 - global `DashboardResponse.approvals` are associated to sessions through `PendingRequestView.threadId == SessionSummary.id`.
 - filtered approval list count takes precedence over `SessionSummary.pendingApprovals` when they disagree.
+- managed sessions that move out of `managed` between polls still produce one turn result alert if their current dashboard summary has a newly completed/interrupted last turn.
+- valid empty dashboards show online running 0 pending 0 and do not clear deduplication state or duplicate later notifications.
 - manual action alerts are not emitted for the initial baseline.
 - persisted snapshots are loaded on service restart and new events since the previous snapshot are not swallowed.
 - persisted snapshot writes use synchronous commit semantics.
@@ -681,6 +737,7 @@ Add tests for:
 - network failures and 15 second HTTP timeouts use 30/60/120 second backoff, and success resets the interval.
 - foreground/background app visibility changes switch between 10 second and 30 second success intervals.
 - stopping monitoring stops polling, stops the foreground service, removes the persistent notification, and marks the current URL as manually stopped.
+- stopping monitoring writes the manual-stop marker before stopping the service and does not rely on service `onDestroy()`.
 - manually re-enabling monitoring creates a fresh baseline and does not backfill alerts from the stopped period.
 - unsupported snapshot versions are discarded and treated as first-start baseline.
 - notification permission denied state is surfaced without crashing monitoring.
@@ -707,9 +764,31 @@ Run:
 /home/lin/.local/share/flutter/bin/flutter build apk --release
 ```
 
+Release signing setup for the first build:
+
+```bash
+mkdir -p /home/lin/.local/share/codexflow-keys
+keytool -genkeypair \
+  -v \
+  -keystore /home/lin/.local/share/codexflow-keys/release.jks \
+  -alias codexflow \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 10000
+```
+
+The implementation may wrap APK copy and metadata generation in a script, but metadata must be generated by command, not hand-edited. After build:
+
+```bash
+sha256sum /home/lin/.local/share/codexflow-web/web/codexflow-android-v0.2.0.apk
+```
+
+Use that SHA256 in `codexflow-android-latest.json`.
+
 Then verify:
 
 - release APK exists
+- release APK is signed with the CodexFlow release keystore, not the debug keystore
 - APK manifest contains network, notification, and foreground service permissions
 - APK manifest declares foreground service type `specialUse` and does not declare the monitoring service as `dataSync`
 - APK packaged or merged manifest contains `android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE`
@@ -725,6 +804,7 @@ Then verify:
 - settings shows app version and build number
 - Web download page or static index links to `codexflow-android-latest.apk`
 - Android APK metadata exists at `codexflow-android-latest.json`, not Flutter Web's generated `version.json`
+- Android APK metadata includes SHA256 computed from the actual copied versioned APK.
 
 ### Android Service Verification
 
@@ -741,12 +821,16 @@ Verify on device or emulator:
 ## Rollout
 
 1. Build and test locally.
-2. Publish the versioned APK to the local Web directory as `codexflow-android-v0.2.0.apk`.
-3. Update `codexflow-android-latest.apk` to the same file contents for convenience.
-4. Update the local Web download page or static metadata so the user can see the APK version, build number, build time, and SHA256.
-5. Keep the old hot-patched APK available only as a fallback.
-6. User installs the new APK on Android.
-7. Verify with Tailscale Agent URL:
+2. If this is the first release build on this machine, create `/home/lin/.local/share/codexflow-keys/release.jks` and `flutter/codexflow/android/key.properties`.
+3. Reuse the same release keystore for every later release build.
+4. Publish the versioned APK to the local Web directory as `codexflow-android-v0.2.0.apk`.
+5. Update `codexflow-android-latest.apk` to the same file contents for convenience.
+6. Compute SHA256 from the copied versioned APK.
+7. Generate `codexflow-android-latest.json` from the actual version, build number, artifact name, build time, and SHA256.
+8. Update the local Web download page or static metadata so the user can see the APK version, build number, build time, and SHA256.
+9. Keep the old hot-patched APK available only as a fallback.
+10. User installs the new APK on Android.
+11. Verify with Tailscale Agent URL:
 
 ```text
 http://100.91.5.116:4318
@@ -795,12 +879,15 @@ Write that metadata to:
 
 Do not write APK metadata to Flutter Web's generated `version.json`.
 
+The implementation should generate this JSON as part of the APK publish step. It should not be hand-edited.
+
 ## Risks
 
 - Android battery optimization can still stop background network work on some devices. This version mitigates that with a foreground service, adaptive polling intervals, visible service state, and explicit offline recovery.
 - Notification permission denial on Android 13+ prevents alert notifications. The app must make that state visible.
 - Tailscale connectivity changes may cause temporary offline status. The service should recover through polling.
 - Polling dashboard summaries can miss intermediate turn results when multiple turns start and finish between two polls. This is accepted for the first version and should be revisited with SSE/event-stream monitoring.
+- If the release keystore is lost, users cannot update the installed APK in place. Keep `/home/lin/.local/share/codexflow-keys/release.jks` backed up outside the repo.
 - Android notification channel sound settings are sticky. Channel ids should change if sound behavior needs to change later.
 - Foreground service policy differs by Android version. The implementation must verify manifest permissions and service type against the target SDK used by Flutter.
 - `specialUse` is appropriate for local sideloaded builds but would require careful Play Console declaration if CodexFlow is later distributed through Google Play.
