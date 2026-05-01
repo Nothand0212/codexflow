@@ -29,7 +29,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.codexflow_flutter"
-        minSdk = 21
+        minSdk = 24
         targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
