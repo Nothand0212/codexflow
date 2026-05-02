@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../domain/session_browser_query.dart';
 import '../domain/session_groups.dart';
 import '../models/app_models.dart';
 import '../state/app_model.dart';
@@ -121,7 +122,7 @@ class DashboardScreen extends StatelessWidget {
                 tone: Palette.softBlue,
                 onTap: () => _openSessionBrowser(
                   context,
-                  _SessionBrowserFilter.all,
+                  SessionBrowserFilter.all,
                   selectedAgentId,
                 ),
               ),
@@ -133,7 +134,7 @@ class DashboardScreen extends StatelessWidget {
                 tone: Palette.accent,
                 onTap: () => _openSessionBrowser(
                   context,
-                  _SessionBrowserFilter.loaded,
+                  SessionBrowserFilter.loaded,
                   selectedAgentId,
                 ),
               ),
@@ -145,7 +146,7 @@ class DashboardScreen extends StatelessWidget {
                 tone: Palette.accent2,
                 onTap: () => _openSessionBrowser(
                   context,
-                  _SessionBrowserFilter.active,
+                  SessionBrowserFilter.active,
                   selectedAgentId,
                 ),
               ),
@@ -198,7 +199,7 @@ class DashboardScreen extends StatelessWidget {
 
   void _openSessionBrowser(
     BuildContext context,
-    _SessionBrowserFilter filter,
+    SessionBrowserFilter filter,
     String agentId,
   ) {
     Navigator.of(context).push<void>(
@@ -208,8 +209,6 @@ class DashboardScreen extends StatelessWidget {
     );
   }
 }
-
-enum _SessionBrowserFilter { all, loaded, active }
 
 class _AgentStatusStrip extends StatelessWidget {
   const _AgentStatusStrip({
@@ -404,7 +403,7 @@ class _HomeMetricButton extends StatelessWidget {
 class _SessionBrowserScreen extends StatefulWidget {
   const _SessionBrowserScreen({required this.filter, required this.agentId});
 
-  final _SessionBrowserFilter filter;
+  final SessionBrowserFilter filter;
   final String agentId;
 
   @override
@@ -437,11 +436,13 @@ class _SessionBrowserScreenState extends State<_SessionBrowserScreen> {
       approvals: model.dashboard.approvals,
       selectedAgentId: widget.agentId,
     );
-    final sessions = _sortedSessions(_sessionsForFilter(sessionGroups));
     final query = _searchController.text.trim().toLowerCase();
-    final visibleSessions = query.isEmpty
-        ? sessions
-        : sessions.where((session) => _matchesQuery(session, query)).toList();
+    final browserQuery = SessionBrowserQuery.apply(
+      groups: sessionGroups,
+      filter: widget.filter,
+      query: query,
+    );
+    final visibleSessions = browserQuery.visibleSessions;
 
     return Scaffold(
       backgroundColor: Palette.canvas,
@@ -509,7 +510,7 @@ class _SessionBrowserScreenState extends State<_SessionBrowserScreen> {
                   ),
                   const SizedBox(width: 6),
                   Text(
-                    '/ ${sessions.length}',
+                    '/ ${browserQuery.totalCount}',
                     style: roundedTextStyle(
                       size: 13,
                       weight: FontWeight.w600,
@@ -554,52 +555,13 @@ class _SessionBrowserScreenState extends State<_SessionBrowserScreen> {
     );
   }
 
-  List<SessionSummary> _sessionsForFilter(SessionGroups groups) {
-    switch (widget.filter) {
-      case _SessionBrowserFilter.loaded:
-        return groups.sessions.where((session) => session.loaded).toList();
-      case _SessionBrowserFilter.active:
-        return groups.sessions
-            .where((session) => session.status == 'active' && !session.isEnded)
-            .toList();
-      case _SessionBrowserFilter.all:
-        return groups.sessions;
-    }
-  }
-
-  List<SessionSummary> _sortedSessions(List<SessionSummary> sessions) {
-    final sorted = <SessionSummary>[...sessions];
-    sorted.sort((left, right) {
-      if (left.updatedAt == right.updatedAt) {
-        return left.id.compareTo(right.id);
-      }
-      return right.updatedAt.compareTo(left.updatedAt);
-    });
-    return sorted;
-  }
-
-  bool _matchesQuery(SessionSummary session, String query) {
-    final haystack = <String>[
-      session.displayName,
-      session.preview,
-      session.cwd,
-      session.branch,
-      session.source,
-      session.status,
-      session.lifecycleStage,
-      session.modelProvider,
-      session.id,
-    ].join('\n').toLowerCase();
-    return haystack.contains(query);
-  }
-
-  String _filterTitle(_SessionBrowserFilter filter) {
+  String _filterTitle(SessionBrowserFilter filter) {
     switch (filter) {
-      case _SessionBrowserFilter.loaded:
+      case SessionBrowserFilter.loaded:
         return '已加载';
-      case _SessionBrowserFilter.active:
+      case SessionBrowserFilter.active:
         return '运行中';
-      case _SessionBrowserFilter.all:
+      case SessionBrowserFilter.all:
         return '总会话';
     }
   }

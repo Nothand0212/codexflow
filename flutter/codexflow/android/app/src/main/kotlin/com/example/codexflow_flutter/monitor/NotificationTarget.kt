@@ -1,7 +1,5 @@
 package com.example.codexflow_flutter.monitor
 
-import org.json.JSONObject
-
 data class NotificationTarget(
     val target: String,
     val approvalId: String = "",
@@ -10,13 +8,19 @@ data class NotificationTarget(
     val status: String = "",
 ) {
     fun encode(): String {
-        return JSONObject()
-            .put("target", target)
-            .put("approvalId", approvalId)
-            .put("sessionId", sessionId)
-            .put("turnId", turnId)
-            .put("status", status)
-            .toString()
+        return buildString {
+            append("{")
+            appendJsonField("target", target)
+            append(",")
+            appendJsonField("approvalId", approvalId)
+            append(",")
+            appendJsonField("sessionId", sessionId)
+            append(",")
+            appendJsonField("turnId", turnId)
+            append(",")
+            appendJsonField("status", status)
+            append("}")
+        }
     }
 
     fun requestCode(): Int {
@@ -44,5 +48,37 @@ data class NotificationTarget(
             turnId = turnId,
             status = status,
         )
+    }
+}
+
+private fun StringBuilder.appendJsonField(name: String, value: String) {
+    append("\"")
+    append(escapeJsonString(name))
+    append("\":\"")
+    append(escapeJsonString(value))
+    append("\"")
+}
+
+private fun escapeJsonString(value: String): String {
+    return buildString {
+        for (character in value) {
+            when (character) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\b' -> append("\\b")
+                '\u000C' -> append("\\f")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> {
+                    if (character.code < 0x20) {
+                        append("\\u")
+                        append(character.code.toString(16).padStart(4, '0'))
+                    } else {
+                        append(character)
+                    }
+                }
+            }
+        }
     }
 }

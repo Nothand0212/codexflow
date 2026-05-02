@@ -1,10 +1,11 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
+import '../domain/chat_composer.dart';
+import '../domain/chat_timeline.dart';
 import '../models/app_models.dart';
 import '../state/app_model.dart';
 import '../theme/palette.dart';
@@ -48,8 +49,8 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
   String _lastTimelineSignature = '';
   int _visibleTimelineMessageLimit = _initialTimelineMessageLimit;
   final ImagePicker _imagePicker = ImagePicker();
-  final List<_ComposerAttachment> _attachments = <_ComposerAttachment>[];
-  _PendingComposerMessage? _pendingMessage;
+  final List<ChatComposerAttachment> _attachments = <ChatComposerAttachment>[];
+  PendingChatComposerMessage? _pendingMessage;
 
   @override
   void initState() {
@@ -229,7 +230,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
       }
       setState(() {
         _attachments.add(
-          _ComposerAttachment(
+          ChatComposerAttachment(
             id: '${DateTime.now().microsecondsSinceEpoch}-${uploaded.id}',
             uploadId: uploaded.id,
             name: uploaded.name,
@@ -251,16 +252,18 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
       return;
     }
 
-    final prompt = _promptController.text.trim();
-    final attachments = List<_ComposerAttachment>.from(_attachments);
-    if (prompt.isEmpty && attachments.isEmpty) {
+    final attempt = ChatComposer.beginSubmit(
+      prompt: _promptController.text,
+      attachments: _attachments,
+      isSubmitting: _isSubmittingPrompt,
+    );
+    if (attempt == null) {
       return;
     }
 
-    final pending = _PendingComposerMessage(
-      body: prompt,
-      attachments: attachments,
-    );
+    final pending = attempt.pendingMessage;
+    final prompt = attempt.prompt;
+    final attachments = attempt.attachments;
     setState(() {
       _isSubmittingPrompt = true;
       _pendingMessage = pending;
@@ -273,7 +276,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     final sent = await model.submitPrompt(
       session: summary,
       prompt: prompt,
-      imageUploadIds: attachments.map((item) => item.uploadId).toList(),
+      imageUploadIds: attempt.imageUploadIds,
     );
     if (!mounted || widget.sessionId != summary.id) {
       return;
@@ -327,9 +330,14 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     final sessionApprovals = supportsApprovals
         ? _sessionApprovals(model)
         : <PendingRequestView>[];
-    final agentProcessing = _isAgentProcessing(summary, sessionApprovals);
+    final agentProcessing = ChatTimeline.isAgentProcessing(
+      summary: summary,
+      approvals: sessionApprovals,
+    );
     if (detail != null) {
-      _scheduleScrollToBottom(_timelineSignature(detail, sessionApprovals));
+      _scheduleScrollToBottom(
+        ChatTimeline.signature(detail: detail, approvals: sessionApprovals),
+      );
     }
 
     return Scaffold(
@@ -441,7 +449,10 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     String emptyMessage,
     bool agentProcessing,
   ) {
-    final window = _timelineWindow(detail);
+    final window = ChatTimeline.buildWindow(
+      detail: detail,
+      visibleMessageLimit: _visibleTimelineMessageLimit,
+    );
     if (window.totalCount == 0 && _pendingMessage == null) {
       return <Widget>[
         if (agentProcessing)
@@ -486,80 +497,6 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
         .toList();
   }
 
-  _TimelineWindow _timelineWindow(SessionDetail detail) {
-    final newestItems = <TurnItem>[];
-    var totalCount = 0;
-    for (final turn in detail.turns.reversed) {
-      for (final item in turn.items.reversed) {
-        if (!_isConversationItem(item)) {
-          continue;
-        }
-        totalCount += 1;
-        if (newestItems.length < _visibleTimelineMessageLimit) {
-          newestItems.add(item);
-        }
-      }
-    }
-    return _TimelineWindow(
-      items: newestItems.reversed.toList(growable: false),
-      hiddenCount: totalCount - newestItems.length,
-      totalCount: totalCount,
-    );
-  }
-
-  bool _isConversationItem(TurnItem item) {
-    return item.type == 'userMessage' || item.type == 'agentMessage';
-  }
-
-  bool _isAgentProcessing(
-    SessionSummary? summary,
-    List<PendingRequestView> approvals,
-  ) {
-    if (summary == null || summary.isEnded) {
-      return false;
-    }
-    if (approvals.isNotEmpty || summary.hasWaitingState) {
-      return false;
-    }
-    return summary.lastTurnStatus == 'inProgress';
-  }
-
-  String _timelineSignature(
-    SessionDetail detail,
-    List<PendingRequestView> approvals,
-  ) {
-    final turnParts = detail.turns
-        .map((turn) {
-          return <String>[
-            turn.id,
-            turn.status,
-            '${turn.items.length}',
-            '${turn.durationMs}',
-            turn.error,
-            turn.items
-                .map(
-                  (item) => <String>[
-                    item.id,
-                    item.type,
-                    item.status,
-                    '${item.body.length}',
-                    '${item.auxiliary.length}',
-                    '${item.media.length}',
-                    item.media
-                        .map((media) => '${media.id}:${media.url}')
-                        .join(';'),
-                  ].join(':'),
-                )
-                .join(','),
-          ].join(':');
-        })
-        .join('|');
-    final approvalParts = approvals
-        .map((approval) => '${approval.id}:${approval.turnId}:${approval.kind}')
-        .join('|');
-    return '$turnParts#$approvalParts';
-  }
-
   String _emptyStateMessage(SessionSummary? summary) {
     if (summary != null && summary.isEnded) {
       return '这个会话已经结束。当前没有更多 turn 可展示；如果要继续执行，先重新接管。';
@@ -569,18 +506,6 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     }
     return '这个会话当前没有可展示的 turn 历史。先接管后，才能继续在 CodexFlow 里执行。';
   }
-}
-
-class _TimelineWindow {
-  const _TimelineWindow({
-    required this.items,
-    required this.hiddenCount,
-    required this.totalCount,
-  });
-
-  final List<TurnItem> items;
-  final int hiddenCount;
-  final int totalCount;
 }
 
 class _LoadEarlierMessagesButton extends StatelessWidget {
@@ -1119,34 +1044,10 @@ class _TakeoverCard extends StatelessWidget {
   }
 }
 
-class _ComposerAttachment {
-  _ComposerAttachment({
-    required this.id,
-    required this.uploadId,
-    required this.name,
-    required this.bytes,
-  });
-
-  final String id;
-  final String uploadId;
-  final String name;
-  final Uint8List bytes;
-}
-
-class _PendingComposerMessage {
-  const _PendingComposerMessage({
-    required this.body,
-    required this.attachments,
-  });
-
-  final String body;
-  final List<_ComposerAttachment> attachments;
-}
-
 class _PendingTimelineItem extends StatelessWidget {
   const _PendingTimelineItem({required this.message});
 
-  final _PendingComposerMessage message;
+  final PendingChatComposerMessage message;
 
   @override
   Widget build(BuildContext context) {
@@ -1251,7 +1152,7 @@ class _ComposerCard extends StatelessWidget {
   final SessionSummary summary;
   final List<AgentSkill> skills;
   final TextEditingController promptController;
-  final List<_ComposerAttachment> attachments;
+  final List<ChatComposerAttachment> attachments;
   final bool isUploadingImage;
   final bool isSubmittingPrompt;
   final Future<void> Function() onPickImage;
@@ -1268,10 +1169,11 @@ class _ComposerCard extends StatelessWidget {
     return ListenableBuilder(
       listenable: promptController,
       builder: (BuildContext context, Widget? child) {
-        final trimmedPrompt = promptController.text.trim();
-        final canSubmit =
-            !isSubmittingPrompt &&
-            (trimmedPrompt.isNotEmpty || attachments.isNotEmpty);
+        final canSubmit = ChatComposer.canSubmit(
+          prompt: promptController.text,
+          attachments: attachments,
+          isSubmitting: isSubmittingPrompt,
+        );
         return Container(
           padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
           decoration: BoxDecoration(

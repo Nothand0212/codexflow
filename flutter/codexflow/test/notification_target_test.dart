@@ -23,6 +23,27 @@ void main() {
     expect(target.status, 'completed');
   });
 
+  test('parses the full Kotlin notification route contract', () {
+    final approval = NotificationTarget.fromJsonString(
+      '{"target":"approvals","approvalId":"req-1","sessionId":"s1","turnId":"","status":""}',
+    );
+    final session = NotificationTarget.fromJsonString(
+      '{"target":"sessionDetail","approvalId":"","sessionId":"s1","turnId":"t1","status":"completed"}',
+    );
+
+    expect(approval.target, NotificationTargetKind.approvals);
+    expect(approval.approvalId, 'req-1');
+    expect(approval.sessionId, 's1');
+    expect(approval.turnId, isEmpty);
+    expect(approval.status, isEmpty);
+
+    expect(session.target, NotificationTargetKind.sessionDetail);
+    expect(session.approvalId, isEmpty);
+    expect(session.sessionId, 's1');
+    expect(session.turnId, 't1');
+    expect(session.status, 'completed');
+  });
+
   test('invalid route falls back to dashboard', () {
     final target = NotificationTarget.fromJsonString('{bad json');
 
