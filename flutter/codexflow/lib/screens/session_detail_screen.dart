@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../domain/chat_composer.dart';
+import '../domain/chat_media.dart';
 import '../domain/chat_timeline.dart';
 import '../models/app_models.dart';
 import '../state/app_model.dart';
@@ -14,20 +15,6 @@ import 'approval_screen.dart';
 
 const int _initialTimelineMessageLimit = 80;
 const int _timelineMessagePageSize = 80;
-
-Uri resolveMediaUri(String baseUrl, String url) {
-  final parsed = Uri.tryParse(url);
-  if (parsed != null && parsed.hasScheme) {
-    return parsed;
-  }
-
-  final base = Uri.tryParse(baseUrl);
-  if (base != null && base.hasScheme && parsed != null) {
-    return base.resolveUri(parsed);
-  }
-
-  return Uri(scheme: 'http', host: '127.0.0.1', path: '/invalid-media-url');
-}
 
 class SessionDetailScreen extends StatefulWidget {
   const SessionDetailScreen({super.key, required this.sessionId});
@@ -765,7 +752,7 @@ class _ChatMediaStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final images = media.where((item) => item.isImage).toList(growable: false);
+    final images = ChatMedia.displayableImageAttachments(media);
     if (images.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -792,7 +779,7 @@ class _ChatMediaThumbnail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final uri = resolveMediaUri(baseUrl, media.url);
+    final uri = ChatMedia.resolveMediaUri(baseUrl: baseUrl, url: media.url);
     final aspectRatio = media.width > 0 && media.height > 0
         ? media.width / media.height
         : null;

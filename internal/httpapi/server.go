@@ -19,20 +19,18 @@ import (
 )
 
 type Server struct {
-	agent   *runtime.Agent
-	logger  *slog.Logger
-	mux     *http.ServeMux
-	uploads *imageUploadStore
-	media   *sessionMediaStore
+	agent     *runtime.Agent
+	logger    *slog.Logger
+	mux       *http.ServeMux
+	chatMedia *chatMediaAttachmentModule
 }
 
 func NewServer(agent *runtime.Agent, logger *slog.Logger, cfg config.Config) *Server {
 	server := &Server{
-		agent:   agent,
-		logger:  logger,
-		mux:     http.NewServeMux(),
-		uploads: newImageUploadStore(),
-		media:   initializeSessionMediaStore(logger, cfg.MediaDir),
+		agent:     agent,
+		logger:    logger,
+		mux:       http.NewServeMux(),
+		chatMedia: newChatMediaAttachmentModule(newImageUploadStore(), initializeSessionMediaStore(logger, cfg.MediaDir)),
 	}
 	server.routes()
 	return server
@@ -189,7 +187,7 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, err)
 			return
 		}
-		s.overlaySessionMedia(&detail)
+		s.chatMedia.OverlaySessionMedia(&detail)
 		writeJSON(w, http.StatusOK, detail)
 		return
 	}
@@ -239,12 +237,8 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var request struct {
-			Prompt string `json:"prompt"`
-			Inputs []struct {
-				Type     string `json:"type"`
-				Text     string `json:"text"`
-				UploadID string `json:"uploadId"`
-			} `json:"inputs"`
+			Prompt string          `json:"prompt"`
+			Inputs []chatTurnInput `json:"inputs"`
 		}
 		if !decodeJSON(w, r, &request) {
 			return
@@ -252,7 +246,7 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		buildResult, err := s.buildTurnInput(request.Prompt, request.Inputs)
+		buildResult, err := s.chatMedia.BuildTurnInput(request.Prompt, request.Inputs)
 		if err != nil {
 			writeErrorMessage(w, http.StatusBadRequest, err.Error())
 			return
@@ -262,7 +256,7 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, err)
 			return
 		}
-		if err := s.attachUploadsToFirstUserMessage(sessionID, &turn, buildResult.Uploads); err != nil {
+		if err := s.chatMedia.AttachUploadsToFirstUserMessage(sessionID, &turn, buildResult.Uploads); err != nil {
 			writeError(w, http.StatusBadGateway, err)
 			return
 		}
@@ -273,13 +267,9 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var request struct {
-			TurnID string `json:"turnId"`
-			Prompt string `json:"prompt"`
-			Inputs []struct {
-				Type     string `json:"type"`
-				Text     string `json:"text"`
-				UploadID string `json:"uploadId"`
-			} `json:"inputs"`
+			TurnID string          `json:"turnId"`
+			Prompt string          `json:"prompt"`
+			Inputs []chatTurnInput `json:"inputs"`
 		}
 		if !decodeJSON(w, r, &request) {
 			return
@@ -287,7 +277,7 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		buildResult, err := s.buildTurnInput(request.Prompt, request.Inputs)
+		buildResult, err := s.chatMedia.BuildTurnInput(request.Prompt, request.Inputs)
 		if err != nil {
 			writeErrorMessage(w, http.StatusBadRequest, err.Error())
 			return
@@ -296,7 +286,7 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, err)
 			return
 		}
-		if err := s.attachSteerUploads(ctx, sessionID, request.TurnID, buildResult.Uploads); err != nil {
+		if err := s.chatMedia.AttachSteerUploads(ctx, s.agent, sessionID, request.TurnID, buildResult.Uploads); err != nil {
 			writeError(w, http.StatusBadGateway, err)
 			return
 		}
@@ -345,12 +335,7 @@ func parseNonNegativeInt(value string) int {
 }
 
 func (s *Server) handleSessionMedia(w http.ResponseWriter, r *http.Request, sessionID, mediaID string) {
-	if s.media == nil {
-		writeErrorMessage(w, http.StatusNotFound, "media not found")
-		return
-	}
-
-	mediaFile, err := s.media.OpenMedia(sessionID, mediaID)
+	mediaFile, err := s.chatMedia.OpenSessionMedia(sessionID, mediaID)
 	if err != nil {
 		writeErrorMessage(w, http.StatusNotFound, "media not found")
 		return
@@ -389,37 +374,6 @@ func detectMediaContentType(file *os.File, name string) string {
 		return ""
 	}
 	return http.DetectContentType(buffer[:n])
-}
-
-func (s *Server) overlaySessionMedia(detail *runtime.SessionDetail) {
-	if s.media == nil || detail == nil {
-		return
-	}
-	sessionID := detail.Summary.ID
-	for turnIndex := range detail.Turns {
-		turn := &detail.Turns[turnIndex]
-		for itemIndex := range turn.Items {
-			item := &turn.Items[itemIndex]
-			for _, media := range s.media.MediaForItem(sessionID, turn.ID, item.ID) {
-				if hasMediaAttachment(item.Media, media) {
-					continue
-				}
-				item.Media = append(item.Media, media)
-			}
-		}
-	}
-}
-
-func hasMediaAttachment(existing []runtime.ChatMediaAttachment, candidate runtime.ChatMediaAttachment) bool {
-	for _, media := range existing {
-		if candidate.ID != "" && media.ID == candidate.ID {
-			return true
-		}
-		if candidate.URL != "" && media.URL == candidate.URL {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
@@ -539,7 +493,7 @@ func (s *Server) handleImageUpload(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = "upload-image"
 	}
-	item, err := s.uploads.Save(name, payload)
+	item, err := s.chatMedia.SaveTemporaryImageUpload(name, payload)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
@@ -550,166 +504,6 @@ func (s *Server) handleImageUpload(w http.ResponseWriter, r *http.Request) {
 		"name": item.Name,
 		"size": item.Size,
 	})
-}
-
-type turnInputBuildResult struct {
-	Inputs  []map[string]any
-	Uploads []resolvedImageUpload
-}
-
-type resolvedImageUpload struct {
-	ID       string
-	Name     string
-	Path     string
-	Size     int64
-	MIMEType string
-}
-
-func (s *Server) buildTurnInput(
-	legacyPrompt string,
-	inputs []struct {
-		Type     string `json:"type"`
-		Text     string `json:"text"`
-		UploadID string `json:"uploadId"`
-	},
-) (turnInputBuildResult, error) {
-	if len(inputs) == 0 {
-		prompt := strings.TrimSpace(legacyPrompt)
-		if prompt == "" {
-			return turnInputBuildResult{}, fmt.Errorf("prompt or inputs is required")
-		}
-		return turnInputBuildResult{Inputs: []map[string]any{composeTextInput(prompt)}}, nil
-	}
-
-	result := turnInputBuildResult{
-		Inputs:  make([]map[string]any, 0, len(inputs)),
-		Uploads: make([]resolvedImageUpload, 0),
-	}
-	for _, input := range inputs {
-		switch strings.TrimSpace(input.Type) {
-		case "text":
-			text := strings.TrimSpace(input.Text)
-			if text == "" {
-				return turnInputBuildResult{}, fmt.Errorf("text input cannot be empty")
-			}
-			result.Inputs = append(result.Inputs, composeTextInput(text))
-		case "image":
-			upload, err := s.uploads.Resolve(input.UploadID)
-			if err != nil {
-				return turnInputBuildResult{}, err
-			}
-			result.Inputs = append(result.Inputs, map[string]any{
-				"type": "localImage",
-				"path": upload.Path,
-			})
-			result.Uploads = append(result.Uploads, resolvedImageUpload{
-				ID:       upload.ID,
-				Name:     upload.Name,
-				Path:     upload.Path,
-				Size:     upload.Size,
-				MIMEType: detectUploadMIMEType(upload),
-			})
-		default:
-			return turnInputBuildResult{}, fmt.Errorf("unsupported input type %q", input.Type)
-		}
-	}
-	return result, nil
-}
-
-func detectUploadMIMEType(upload imageUpload) string {
-	if file, err := os.Open(upload.Path); err == nil {
-		defer file.Close()
-		buffer := make([]byte, 512)
-		n, readErr := file.Read(buffer)
-		if (readErr == nil || readErr == io.EOF) && n > 0 {
-			if contentType := http.DetectContentType(buffer[:n]); strings.HasPrefix(contentType, "image/") {
-				return contentType
-			}
-		}
-	}
-
-	for _, path := range []string{upload.Name, upload.Path} {
-		if contentType := mime.TypeByExtension(filepath.Ext(strings.TrimSpace(path))); contentType != "" {
-			return contentType
-		}
-	}
-	return ""
-}
-
-func (s *Server) attachUploadsToFirstUserMessage(sessionID string, turn *runtime.TurnDetail, uploads []resolvedImageUpload) error {
-	if s.media == nil || turn == nil || len(uploads) == 0 {
-		return nil
-	}
-	for index := range turn.Items {
-		if turn.Items[index].Type != "userMessage" {
-			continue
-		}
-		if err := s.attachUploadsToItem(sessionID, turn.ID, turn.Items[index].ID, uploads); err != nil {
-			return err
-		}
-		turn.Items[index].Media = s.media.MediaForItem(sessionID, turn.ID, turn.Items[index].ID)
-		return nil
-	}
-	return nil
-}
-
-func (s *Server) attachSteerUploads(ctx context.Context, sessionID, turnID string, uploads []resolvedImageUpload) error {
-	if s.media == nil || len(uploads) == 0 {
-		return nil
-	}
-	detail, err := s.agent.SessionDetailPage(ctx, sessionID, runtime.SessionDetailPageRequest{TurnLimit: runtime.MaxSessionDetailTurnLimit})
-	if err != nil {
-		return err
-	}
-	targetTurnID := strings.TrimSpace(turnID)
-	for turnIndex := len(detail.Turns) - 1; turnIndex >= 0; turnIndex-- {
-		turn := detail.Turns[turnIndex]
-		if targetTurnID != "" && turn.ID != targetTurnID {
-			continue
-		}
-		if itemID, ok := latestUserMessageItemID(turn); ok {
-			return s.attachUploadsToItem(sessionID, turn.ID, itemID, uploads)
-		}
-		return fmt.Errorf("turn %q has no user message for image attachment", turn.ID)
-	}
-	if targetTurnID != "" {
-		return fmt.Errorf("turn %q could not be found for image attachment", targetTurnID)
-	}
-	return nil
-}
-
-func latestUserMessageItemID(turn runtime.TurnDetail) (string, bool) {
-	for index := len(turn.Items) - 1; index >= 0; index-- {
-		if turn.Items[index].Type == "userMessage" {
-			return turn.Items[index].ID, true
-		}
-	}
-	return "", false
-}
-
-func (s *Server) attachUploadsToItem(sessionID, turnID, itemID string, uploads []resolvedImageUpload) error {
-	for _, upload := range uploads {
-		if _, err := s.media.AttachUpload(sessionMediaUpload{
-			SessionID: sessionID,
-			TurnID:    turnID,
-			ItemID:    itemID,
-			Name:      upload.Name,
-			MIMEType:  upload.MIMEType,
-			Path:      upload.Path,
-			Size:      upload.Size,
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func composeTextInput(prompt string) map[string]any {
-	return map[string]any{
-		"type":          "text",
-		"text":          prompt,
-		"text_elements": []any{},
-	}
 }
 
 func (s *Server) withLogging(next http.Handler) http.Handler {

@@ -23,6 +23,9 @@ type sessionMediaUpload struct {
 	MIMEType  string
 	Path      string
 	Size      int64
+	Width     int
+	Height    int
+	SourceURL string
 }
 
 type sessionMediaRecord struct {
@@ -30,6 +33,7 @@ type sessionMediaRecord struct {
 	TurnID    string                      `json:"turnId"`
 	ItemID    string                      `json:"itemId"`
 	FileName  string                      `json:"fileName"`
+	SourceURL string                      `json:"sourceUrl,omitempty"`
 	Media     runtime.ChatMediaAttachment `json:"media"`
 }
 
@@ -107,6 +111,8 @@ func (s *sessionMediaStore) AttachUpload(upload sessionMediaUpload) (runtime.Cha
 		MIMEType: strings.TrimSpace(upload.MIMEType),
 		URL:      fmt.Sprintf("/api/v1/sessions/%s/media/%s", sessionID, mediaID),
 		Size:     upload.Size,
+		Width:    upload.Width,
+		Height:   upload.Height,
 	}
 	if attachment.Name == "" {
 		attachment.Name = "upload" + ext
@@ -117,6 +123,7 @@ func (s *sessionMediaStore) AttachUpload(upload sessionMediaUpload) (runtime.Cha
 		TurnID:    strings.TrimSpace(upload.TurnID),
 		ItemID:    strings.TrimSpace(upload.ItemID),
 		FileName:  fileName,
+		SourceURL: strings.TrimSpace(upload.SourceURL),
 		Media:     attachment,
 	}
 
@@ -129,6 +136,30 @@ func (s *sessionMediaStore) AttachUpload(upload sessionMediaUpload) (runtime.Cha
 		return runtime.ChatMediaAttachment{}, err
 	}
 	return attachment, nil
+}
+
+func (s *sessionMediaStore) MediaForSource(sessionID, turnID, itemID, sourceURL string) []runtime.ChatMediaAttachment {
+	sessionID = strings.TrimSpace(sessionID)
+	turnID = strings.TrimSpace(turnID)
+	itemID = strings.TrimSpace(itemID)
+	sourceURL = strings.TrimSpace(sourceURL)
+	if sourceURL == "" {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	media := make([]runtime.ChatMediaAttachment, 0)
+	for _, record := range s.records {
+		if record.SessionID == sessionID &&
+			record.TurnID == turnID &&
+			record.ItemID == itemID &&
+			record.SourceURL == sourceURL {
+			media = append(media, record.Media)
+		}
+	}
+	return media
 }
 
 func (s *sessionMediaStore) MediaForItem(sessionID, turnID, itemID string) []runtime.ChatMediaAttachment {
