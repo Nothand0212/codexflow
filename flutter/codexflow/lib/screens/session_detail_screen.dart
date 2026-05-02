@@ -43,11 +43,13 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
   Timer? _timer;
   int _tick = 0;
   bool _isUploadingImage = false;
+  bool _isSubmittingPrompt = false;
   bool _isLoadingEarlierMessages = false;
   String _lastTimelineSignature = '';
   int _visibleTimelineMessageLimit = _initialTimelineMessageLimit;
   final ImagePicker _imagePicker = ImagePicker();
   final List<_ComposerAttachment> _attachments = <_ComposerAttachment>[];
+  _PendingComposerMessage? _pendingMessage;
 
   @override
   void initState() {
@@ -69,6 +71,8 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     if (oldWidget.sessionId != widget.sessionId) {
       _lastTimelineSignature = '';
       _visibleTimelineMessageLimit = _initialTimelineMessageLimit;
+      _isSubmittingPrompt = false;
+      _pendingMessage = null;
     }
   }
 
@@ -242,6 +246,65 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     }
   }
 
+  Future<void> _submitPromptOptimistically(SessionSummary summary) async {
+    if (_isSubmittingPrompt) {
+      return;
+    }
+
+    final prompt = _promptController.text.trim();
+    final attachments = List<_ComposerAttachment>.from(_attachments);
+    if (prompt.isEmpty && attachments.isEmpty) {
+      return;
+    }
+
+    final pending = _PendingComposerMessage(
+      body: prompt,
+      attachments: attachments,
+    );
+    setState(() {
+      _isSubmittingPrompt = true;
+      _pendingMessage = pending;
+      _promptController.clear();
+      _attachments.clear();
+    });
+    _scrollToBottomWhenReady();
+
+    final model = context.read<AppModel>();
+    final sent = await model.submitPrompt(
+      session: summary,
+      prompt: prompt,
+      imageUploadIds: attachments.map((item) => item.uploadId).toList(),
+    );
+    if (!mounted || widget.sessionId != summary.id) {
+      return;
+    }
+
+    if (sent) {
+      setState(() {
+        _isSubmittingPrompt = false;
+        if (identical(_pendingMessage, pending)) {
+          _pendingMessage = null;
+        }
+      });
+      _scrollToBottomWhenReady();
+      return;
+    }
+
+    setState(() {
+      _isSubmittingPrompt = false;
+      if (identical(_pendingMessage, pending)) {
+        _pendingMessage = null;
+      }
+      _promptController.value = TextEditingValue(
+        text: prompt,
+        selection: TextSelection.collapsed(offset: prompt.length),
+      );
+      _attachments
+        ..clear()
+        ..addAll(attachments);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final model = context.watch<AppModel>();
@@ -352,27 +415,14 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
                         promptController: _promptController,
                         attachments: _attachments,
                         isUploadingImage: _isUploadingImage,
+                        isSubmittingPrompt: _isSubmittingPrompt,
                         onPickImage: _pickAndUploadImage,
                         onRemoveAttachment: (String id) {
                           setState(() {
                             _attachments.removeWhere((item) => item.id == id);
                           });
                         },
-                        onSubmit: () async {
-                          final sent = await model.submitPrompt(
-                            session: summary,
-                            prompt: _promptController.text.trim(),
-                            imageUploadIds: _attachments
-                                .map((item) => item.uploadId)
-                                .toList(),
-                          );
-                          if (sent) {
-                            _promptController.clear();
-                            setState(() {
-                              _attachments.clear();
-                            });
-                          }
-                        },
+                        onSubmit: () => _submitPromptOptimistically(summary),
                         supportsInterruptTurn: supportsInterruptTurn,
                         onEnd: () async {
                           await model.endSession(summary);
@@ -392,7 +442,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     bool agentProcessing,
   ) {
     final window = _timelineWindow(detail);
-    if (window.totalCount == 0) {
+    if (window.totalCount == 0 && _pendingMessage == null) {
       return <Widget>[
         if (agentProcessing)
           const _AgentProcessingBubble()
@@ -423,6 +473,8 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
           ),
         ),
       ...window.items.map((item) => _TimelineItem(item: item)),
+      if (_pendingMessage != null)
+        _PendingTimelineItem(message: _pendingMessage!),
       if (agentProcessing) const _AgentProcessingBubble(),
     ];
 
@@ -1081,6 +1133,106 @@ class _ComposerAttachment {
   final Uint8List bytes;
 }
 
+class _PendingComposerMessage {
+  const _PendingComposerMessage({
+    required this.body,
+    required this.attachments,
+  });
+
+  final String body;
+  final List<_ComposerAttachment> attachments;
+}
+
+class _PendingTimelineItem extends StatelessWidget {
+  const _PendingTimelineItem({required this.message});
+
+  final _PendingComposerMessage message;
+
+  @override
+  Widget build(BuildContext context) {
+    final maxWidth = MediaQuery.of(context).size.width * 0.78;
+    final hasBody = message.body.trim().isNotEmpty;
+    return Align(
+      alignment: Alignment.centerRight,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: Container(
+          key: const ValueKey<String>('pending-chat-message'),
+          padding: const EdgeInsets.all(12),
+          decoration: const BoxDecoration(
+            color: Palette.softBlue,
+            borderRadius: BorderRadius.only(
+              topLeft: Radius.circular(16),
+              topRight: Radius.circular(16),
+              bottomLeft: Radius.circular(16),
+              bottomRight: Radius.circular(4),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Text(
+                    '你',
+                    style: roundedTextStyle(
+                      size: 11,
+                      weight: FontWeight.w700,
+                      color: Colors.white70,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const SizedBox(
+                    width: 10,
+                    height: 10,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.6,
+                      color: Colors.white70,
+                    ),
+                  ),
+                ],
+              ),
+              if (hasBody) ...<Widget>[
+                const SizedBox(height: 5),
+                SelectableText(
+                  message.body,
+                  style: roundedTextStyle(
+                    size: 14,
+                    weight: FontWeight.w500,
+                    color: Colors.white,
+                    height: 1.42,
+                  ),
+                ),
+              ],
+              if (message.attachments.isNotEmpty) ...<Widget>[
+                SizedBox(height: hasBody ? 8 : 6),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: message.attachments
+                      .map(
+                        (attachment) => ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: Image.memory(
+                            attachment.bytes,
+                            width: 96,
+                            height: 96,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ComposerCard extends StatelessWidget {
   const _ComposerCard({
     required this.summary,
@@ -1088,6 +1240,7 @@ class _ComposerCard extends StatelessWidget {
     required this.promptController,
     required this.attachments,
     required this.isUploadingImage,
+    required this.isSubmittingPrompt,
     required this.onPickImage,
     required this.onRemoveAttachment,
     required this.onSubmit,
@@ -1100,6 +1253,7 @@ class _ComposerCard extends StatelessWidget {
   final TextEditingController promptController;
   final List<_ComposerAttachment> attachments;
   final bool isUploadingImage;
+  final bool isSubmittingPrompt;
   final Future<void> Function() onPickImage;
   final void Function(String id) onRemoveAttachment;
   final Future<void> Function() onSubmit;
@@ -1115,7 +1269,9 @@ class _ComposerCard extends StatelessWidget {
       listenable: promptController,
       builder: (BuildContext context, Widget? child) {
         final trimmedPrompt = promptController.text.trim();
-        final canSubmit = trimmedPrompt.isNotEmpty || attachments.isNotEmpty;
+        final canSubmit =
+            !isSubmittingPrompt &&
+            (trimmedPrompt.isNotEmpty || attachments.isNotEmpty);
         return Container(
           padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
           decoration: BoxDecoration(
@@ -1230,6 +1386,7 @@ class _ComposerCard extends StatelessWidget {
                   Expanded(
                     child: TextField(
                       controller: promptController,
+                      enabled: !isSubmittingPrompt,
                       minLines: 1,
                       maxLines: 4,
                       textCapitalization: TextCapitalization.sentences,
@@ -1282,13 +1439,22 @@ class _ComposerCard extends StatelessWidget {
                           : null,
                       child: Padding(
                         padding: const EdgeInsets.all(11),
-                        child: Icon(
-                          isSteering
-                              ? Icons.alt_route_rounded
-                              : Icons.arrow_upward_rounded,
-                          color: Colors.white,
-                          size: 20,
-                        ),
+                        child: isSubmittingPrompt
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : Icon(
+                                isSteering
+                                    ? Icons.alt_route_rounded
+                                    : Icons.arrow_upward_rounded,
+                                color: Colors.white,
+                                size: 20,
+                              ),
                       ),
                     ),
                   ),

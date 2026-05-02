@@ -163,6 +163,8 @@ class MainActivity : FlutterActivity() {
             return
         }
         pendingNotificationRoute = route
+        intent.action = Intent.ACTION_MAIN
+        intent.removeExtra(CodexFlowNotifications.EXTRA_NOTIFICATION_TARGET)
         if (deliverToFlutter) {
             channel?.invokeMethod("notificationRoute", route)
         }

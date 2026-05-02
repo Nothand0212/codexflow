@@ -75,3 +75,15 @@ Mobile notifications should only be emitted for new changes in sessions currentl
 The Android client should build a baseline when monitoring starts and must not notify for old pending requests or historical turn states that already existed before monitoring began.
 
 Historical, discovered, and ended sessions should stay visible in the UI, but they should not generate completion, interruption, or manual action alerts unless they are resumed into a managed session and then receive new events.
+
+### Mobile Notification Route
+
+A Mobile Notification Route is the app navigation intent produced by tapping a CodexFlow mobile notification.
+
+It should identify a dashboard, approval, or Chat Timeline target without exposing Android notification or Flutter navigation implementation details to callers.
+
+A Mobile Notification Route is consumed once. Re-delivering the same route should not stack duplicate pages. If the app is already showing the target Chat Timeline, CodexFlow should refresh or keep that page rather than pushing another copy.
+
+When a Mobile Notification Route targets a different Chat Timeline than the one currently open, CodexFlow should replace the current detail route so that one back action returns to the Session Overview Home.
+
+When a Mobile Notification Route targets a Manual Action Required item that has already been resolved, CodexFlow should show the Approval Center and a lightweight notice instead of leaving the user on a stale detail route.

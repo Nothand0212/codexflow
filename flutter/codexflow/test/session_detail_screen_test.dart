@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:codexflow_flutter/models/app_models.dart';
 import 'package:codexflow_flutter/screens/session_detail_screen.dart';
 import 'package:codexflow_flutter/state/app_model.dart';
@@ -377,6 +379,54 @@ void main() {
     expect(model.endSessionCalls, 0);
   });
 
+  testWidgets('composer shows pending message immediately after send tap', (
+    WidgetTester tester,
+  ) async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final prefs = await SharedPreferences.getInstance();
+    final model = _DelayedSubmitAppModel(prefs);
+    final summary = _sessionSummary();
+    model.dashboard = _dashboard(summary);
+    model.sessionDetails[summary.id] = SessionDetail(
+      summary: summary,
+      turns: <TurnDetail>[_turn(0)],
+    );
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider<AppModel>.value(
+        value: model,
+        child: MaterialApp(home: SessionDetailScreen(sessionId: summary.id)),
+      ),
+    );
+    for (var index = 0; index < 6; index += 1) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+
+    await tester.enterText(find.byType(TextField).last, 'optimize send delay');
+    await tester.pump();
+    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.pump();
+
+    expect(model.submitPromptCalls, 1);
+    expect(
+      find.byKey(const ValueKey<String>('pending-chat-message')),
+      findsOneWidget,
+    );
+    expect(find.text('optimize send delay'), findsOneWidget);
+
+    final editable = tester
+        .widgetList<EditableText>(find.byType(EditableText))
+        .last;
+    expect(editable.controller.text, isEmpty);
+
+    model.completeSubmit(true);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey<String>('pending-chat-message')),
+      findsNothing,
+    );
+  });
+
   testWidgets('markdown inline code remains readable on light chat bubbles', (
     WidgetTester tester,
   ) async {
@@ -410,6 +460,29 @@ class _StaticAppModel extends AppModel {
   @override
   Future<void> endSession(SessionSummary session) async {
     endSessionCalls += 1;
+  }
+}
+
+class _DelayedSubmitAppModel extends _StaticAppModel {
+  _DelayedSubmitAppModel(super.prefs);
+
+  int submitPromptCalls = 0;
+  final Completer<bool> submitCompleter = Completer<bool>();
+
+  @override
+  Future<bool> submitPrompt({
+    required SessionSummary session,
+    required String prompt,
+    List<String> imageUploadIds = const <String>[],
+  }) {
+    submitPromptCalls += 1;
+    return submitCompleter.future;
+  }
+
+  void completeSubmit(bool value) {
+    if (!submitCompleter.isCompleted) {
+      submitCompleter.complete(value);
+    }
   }
 }
 
